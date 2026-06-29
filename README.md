@@ -6,11 +6,19 @@ packet's protocol layers in a **tree view**, and filters with a
 **Wireshark/tshark-compatible display-filter** syntax. New protocols can be
 defined at runtime with libpcapng-style `.posa` files and bound to ports.
 
+It also has a **command-line scripting mode** (a generalized
+[MQS](https://github.com/stricaud/MQS)): instead of decoding only MySQL and
+handing a query string to Lua, caracal decodes *any* protocol and hands the
+fully decoded fields — and reassembled IP datagrams and TCP streams — to a
+**LuaJIT** script.
+
 Built on:
 
 - **[gtcaca](../gtcaca)** — libcaca TUI widget toolkit (table, tree, menu,
   filechooser, dialog, entry, status bar).
-- **[libpcapng](../libpcapng)** — pcapng reading; `.posa` protocol concept.
+- **[libpcapng](../libpcapng)** — pcapng reading; IP-fragment and TCP-stream
+  reassembly (`libpcapng_reasm_*`, `pcapng_tcp_reasm_*`); `.posa` protocols.
+- **LuaJIT** — embedded scripting engine (found via `pkg-config`).
 
 ## Building
 
@@ -29,6 +37,13 @@ Override dependency locations if they live elsewhere:
 ```sh
 cmake .. -DGTCACA_ROOT=/path/to/gtcaca -DLIBPCAPNG_ROOT=/path/to/libpcapng
 ```
+
+> **Runtime note.** caracal needs the *current* gtcaca and libpcapng shared
+> libraries (the scripting mode uses libpcapng's reassembly API). If an older
+> copy is already installed in `/usr/local/lib`, it can shadow the freshly built
+> one. Either install the up-to-date libraries from their build dirs
+> (`sudo make install` in each `build/`), or run with
+> `DYLD_LIBRARY_PATH=/path/to/libpcapng/build/lib`.
 
 ## Using it
 
@@ -85,6 +100,75 @@ Field types: `uint8/16/32/64`, `le_uint16/32/64`, `mac`, `ip4`, `cstring`,
 `payload`, `bytes<N>`, `bytes[lenfield]`. Indented `NAME = value` lines under an
 integer field define enum labels. `Object<parent>` groups sub-protocols
 dispatched on the first field's value (see `protos/tftp.posa`).
+
+## Command-line scripting (LuaJIT)
+
+Drive captures from a Lua script — the generalized MQS use-case. Selecting `-s`
+enters scripting mode (no TUI):
+
+```sh
+caracal -s script.lua -r capture.pcapng \
+        [-f "display filter"] [-X "tcp 3306 MySQL"] [-p extra.posa]
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-s` | Lua script to run |
+| `-r` | capture file to read (pcap/pcapng) |
+| `-f` | display filter limiting which packets reach `packet()` |
+| `-X` | bind a port to a `.posa` protocol (`"<udp\|tcp> <port> <Proto>"`), repeatable |
+| `-p` | load an extra `.posa` file, repeatable |
+
+A script defines any of these entry points:
+
+```lua
+function init()          end   -- once, before processing
+function packet(pkt)     end   -- per (IP-defragmented) packet
+function stream(s)       end   -- per reassembled in-order TCP chunk
+function finish(stats)   end   -- once, after processing
+```
+
+`pkt` carries the decoded packet and its fields in their various forms:
+
+```lua
+pkt.number, pkt.time, pkt.len, pkt.protocol, pkt.src, pkt.dst, pkt.info
+pkt.srcport, pkt.dstport, pkt.l4, pkt.payload   -- transport payload (full bytes)
+pkt.raw                                          -- whole frame bytes
+pkt.layers          -- { "eth", "ip", "tcp", … }  ordered
+pkt.fields["ip.src"]                             -- natural Lua value
+pkt:get("ip.src")   -- { type=, value=, hex=, label= }  (the "various ways")
+pkt:getall("ip.addr")                            -- every matching field
+pkt:has("tcp")                                   -- existence test
+pkt:matches("tcp.flags == 0x02")                 -- the display-filter engine
+```
+
+Globals decode arbitrary bytes — including "the various ways a protocol can be
+decoded":
+
+```lua
+caracal.decode_as(bytes, "TFTP")    -- dispatched posa decode → {field=value,…}
+caracal.decode_all(bytes, "TFTP")   -- every candidate sub-protocol's decode
+caracal.dissect(bytes [, linktype]) -- full built-in dissection of raw bytes
+caracal.protocols()                 -- names of loaded posa protocols
+caracal.hex(bytes)
+```
+
+### Reassembly
+
+- **IP fragments** are reassembled by libpcapng (`libpcapng_reasm_add`); a
+  fragmented datagram reaches `packet()` whole.
+- **TCP streams** are reassembled by libpcapng's `pcapng_tcp_reasm_*` API (added
+  as a library feature, not specific to caracal). In-order bytes per direction
+  arrive at `stream(s)` with `s.data` (new bytes), `s.all` (cumulative),
+  `s.src/dst/srcport/dstport/dir`, and `s:decode_as(proto)`.
+
+Bundled examples are in [`scripts/`](scripts/): `summary.lua`, `fields.lua`,
+`tftp.lua`, and `mysql-queries.lua` (sniff MariaDB/MySQL `COM_QUERY` statements
+from a reassembled stream — the MQS use-case, on any capture file):
+
+```sh
+caracal -s scripts/mysql-queries.lua -r dump.pcapng -f "tcp.port == 3306"
+```
 
 ## Scope / limitations
 

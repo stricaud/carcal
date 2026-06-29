@@ -32,14 +32,21 @@ set(LIBPCAPNG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../libpcapng" CACHE PATH "libpca
 include(FindPkgConfig)
 pkg_check_modules(CACA REQUIRED caca)
 
+# ── LuaJIT (required, via pkg-config) ───────────────────────────────────────
+pkg_check_modules(LUAJIT REQUIRED luajit)
+
 # ── libpcapng ───────────────────────────────────────────────────────────────
 pkg_check_modules(PCAPNG QUIET libpcapng)
+# Prefer the source include tree — the installed headers omit protocols/ and
+# reassembly.h, which caracal's reassembly + posa decoding need.
 find_path(PCAPNG_INCLUDE_DIR
-  NAMES libpcapng/libpcapng.h
-  HINTS ${PCAPNG_INCLUDEDIR} /usr/local/include "${LIBPCAPNG_ROOT}/lib/include")
+  NAMES libpcapng/reassembly.h libpcapng/libpcapng.h
+  HINTS "${LIBPCAPNG_ROOT}/lib/include" ${PCAPNG_INCLUDEDIR} /usr/local/include)
+# Prefer the freshly built dylib — the installed one may predate exported
+# symbols (reassembly, flow-direction normalizer) that caracal needs.
 find_library(PCAPNG_LIBRARY
   NAMES pcapng
-  HINTS ${PCAPNG_LIBDIR} /usr/local/lib "${LIBPCAPNG_ROOT}/build/lib")
+  HINTS "${LIBPCAPNG_ROOT}/build/lib" ${PCAPNG_LIBDIR} /usr/local/lib)
 if(NOT PCAPNG_INCLUDE_DIR OR NOT PCAPNG_LIBRARY)
   message(FATAL_ERROR "libpcapng not found. Build it under ${LIBPCAPNG_ROOT}/build "
                       "or pass -DPCAPNG_INCLUDE_DIR=... -DPCAPNG_LIBRARY=...")
@@ -81,11 +88,13 @@ add_executable(caracal
   src/dissect.c
   src/posa.c
   src/filter.c
-  src/field.c)
+  src/field.c
+  src/lua_run.c)
 
 target_include_directories(caracal PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CACA_INCLUDE_DIRS}
+  ${LUAJIT_INCLUDE_DIRS}
   ${PCAPNG_INCLUDE_DIR}
   ${GTCACA_INCLUDE_DIR})
 
@@ -93,13 +102,17 @@ if(GTCACA_BUILD_INCLUDE_DIR)
   target_include_directories(caracal PRIVATE ${GTCACA_BUILD_INCLUDE_DIR})
 endif()
 
-target_link_directories(caracal PRIVATE ${CACA_LIBRARY_DIRS})
+target_link_directories(caracal PRIVATE ${CACA_LIBRARY_DIRS} ${LUAJIT_LIBRARY_DIRS})
 
 target_link_libraries(caracal PRIVATE
   ${GTCACA_LIBRARY}
   ${PCAPNG_LIBRARY}
   ${CACA_LIBRARIES}
+  ${LUAJIT_LIBRARIES}
   m)
+
+# Older LuaJIT-on-macOS guidance asks for -pagezero_size/-image_base, but those
+# are x86_64-only and ignored under arm64 PIE, so we omit them.
 
 # Ship the sample protocol definitions next to the binary so caracal can load
 # them at startup (CARACAL_PROTOS_DIR) without an install step.

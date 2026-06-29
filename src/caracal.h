@@ -157,6 +157,9 @@ const char *posa_bound_tcp(uint16_t port);
 /* Dissect `data` as the named posa protocol, attaching a subtree to `parent`.
    Returns bytes consumed, 0 if it could not (unknown proto / no data). */
 int  posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent);
+/* Resolve a name to a concrete protocol, or — if it names an Object<parent>
+   group — the sub-protocol whose first field matches `data`. NULL if neither. */
+const posa_proto_t *posa_resolve(const char *name, const uint8_t *data, int len);
 
 /* ── filter.c — display filter ──────────────────────────────────────────── */
 typedef struct cfilter cfilter_t;
@@ -166,5 +169,15 @@ cfilter_t *filter_compile(const char *expr, char *errbuf, size_t errlen);
 /* Evaluate against a dissection tree (non-zero = packet passes). */
 int        filter_eval(const cfilter_t *f, cfield_t *root);
 void       filter_free(cfilter_t *f);
+
+/* TCP stream reassembly now lives in libpcapng (pcapng_tcp_reasm_*,
+   <libpcapng/reassembly_tcp.h>) — it is a library feature, not caracal's. */
+
+/* ── lua_run.c — scriptable processing (generalized MQS) ────────────────── */
+/* Run `script_path` against the capture. For each packet (IP-defragmented via
+   libpcapng) the Lua `packet(pkt)` is called (when present and `flt` passes);
+   reassembled TCP stream bytes drive `stream(s)`. Returns 0 on success. */
+int caracal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
+                    char *errbuf, size_t errlen);
 
 #endif /* CARACAL_H */

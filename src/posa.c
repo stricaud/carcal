@@ -390,6 +390,15 @@ static const posa_proto_t *resolve_group(const char *name, const uint8_t *data, 
   return best >= 0 ? &g_protos[best] : NULL;
 }
 
+const posa_proto_t *posa_resolve(const char *name, const uint8_t *data, int len)
+{
+  const posa_proto_t *p;
+  if (!name) return NULL;
+  p = posa_find(name);
+  if (p) return p;
+  return resolve_group(name, data, len);
+}
+
 int posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent)
 {
   const posa_proto_t *p = posa_find(proto_name);

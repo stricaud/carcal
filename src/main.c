@@ -461,6 +461,73 @@ static int dump_mode(const char *path, const char *expr)
   return 0;
 }
 
+/* ───────────────────────── lua mode (generalized MQS) ─────────────────── */
+static void apply_bind(const char *spec)   /* "udp 69 TFTP" */
+{
+  char tr[16], pr[64]; unsigned pt;
+  if (sscanf(spec, "%15s %u %63s", tr, &pt, pr) != 3) {
+    fprintf(stderr, "caracal: bad -X binding '%s' (want '<udp|tcp> <port> <Proto>')\n", spec);
+    return;
+  }
+  if (!strcmp(tr, "udp")) posa_bind_udp((uint16_t)pt, pr);
+  else if (!strcmp(tr, "tcp")) posa_bind_tcp((uint16_t)pt, pr);
+  else fprintf(stderr, "caracal: -X transport must be udp or tcp\n");
+}
+
+static int lua_cli(int argc, char **argv)
+{
+  const char *script = NULL, *capf = NULL, *filt = NULL;
+  const char *binds[32]; int nbinds = 0;
+  const char *posas[32]; int nposas = 0;
+  capture_t cap;
+  cfilter_t *flt = NULL;
+  char err[256] = "";
+  int i, rc;
+
+  for (i = 1; i < argc; i++) {
+    if      ((!strcmp(argv[i], "-s") || !strcmp(argv[i], "--script")) && i + 1 < argc) script = argv[++i];
+    else if (!strcmp(argv[i], "-r") && i + 1 < argc) capf = argv[++i];
+    else if (!strcmp(argv[i], "-f") && i + 1 < argc) filt = argv[++i];
+    else if (!strcmp(argv[i], "-X") && i + 1 < argc) { if (nbinds < 32) binds[nbinds++] = argv[++i]; }
+    else if (!strcmp(argv[i], "-p") && i + 1 < argc) { if (nposas < 32) posas[nposas++] = argv[++i]; }
+    else if (argv[i][0] != '-' && !capf) capf = argv[i];
+  }
+
+  if (!script) { fprintf(stderr, "caracal: -s <script.lua> is required\n"); return 2; }
+  if (!capf)   { fprintf(stderr, "caracal: -r <capture> is required\n"); return 2; }
+
+  posa_load_dir(CARACAL_PROTOS_DIR);
+  for (i = 0; i < nposas; i++) {
+    if (posa_load_file(posas[i], err, sizeof err) < 0)
+      fprintf(stderr, "caracal: -p %s: %s\n", posas[i], err);
+  }
+  for (i = 0; i < nbinds; i++) apply_bind(binds[i]);
+
+  if (capture_load(capf, &cap, err, sizeof err) != 0) {
+    fprintf(stderr, "caracal: %s\n", err);
+    return 1;
+  }
+  if (filt && *filt) {
+    flt = filter_compile(filt, err, sizeof err);
+    if (!flt) { fprintf(stderr, "caracal: filter: %s\n", err); capture_free(&cap); return 1; }
+  }
+
+  rc = caracal_lua_run(script, &cap, flt, err, sizeof err);
+  if (rc != 0) fprintf(stderr, "caracal: lua: %s\n", err);
+
+  if (flt) filter_free(flt);
+  capture_free(&cap);
+  return rc ? 1 : 0;
+}
+
+static int has_arg(int argc, char **argv, const char *a, const char *b)
+{
+  int i;
+  for (i = 1; i < argc; i++)
+    if (!strcmp(argv[i], a) || (b && !strcmp(argv[i], b))) return 1;
+  return 0;
+}
+
 /* ───────────────────────── main ───────────────────────────────────────── */
 int main(int argc, char **argv)
 {
@@ -475,6 +542,10 @@ int main(int argc, char **argv)
   /* Headless mode for scripting/testing: caracal --dump <file> [filter] */
   if (argc >= 3 && strcmp(argv[1], "--dump") == 0)
     return dump_mode(argv[2], argc > 3 ? argv[3] : NULL);
+
+  /* Lua scripting mode (generalized MQS): caracal -s script.lua -r cap … */
+  if (has_arg(argc, argv, "-s", "--script"))
+    return lua_cli(argc, argv);
 
   if (gtcaca_init(&argc, &argv) < 0) {
     fprintf(stderr, "caracal: cannot initialize display\n");
