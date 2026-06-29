@@ -55,7 +55,20 @@ cmake .. -DGTCACA_ROOT=/path/to/gtcaca -DLIBPCAPNG_ROOT=/path/to/libpcapng
 | `Tab` | Cycle focus: filter → packet table → detail tree |
 | `↑ ↓ PgUp PgDn Home End` | Navigate the focused pane |
 | `← → / Space / Enter` | Collapse/expand a detail-tree node |
+| `^F` | Find packet (text, or `hex:DE AD BE EF`) |
+| `n` / `N` | Jump to next / previous find match |
 | `q` / `^Q` | Quit |
+
+The lower area is split into the **detail tree** (left) and a Wireshark-style
+**hex byte pane** (right) for the selected packet. Menus (F10):
+
+- **Edit** — Find Packet / Find Next / Find Previous.
+- **Analyze** — Follow TCP Stream, Follow UDP Stream, Decode As…, Decoders…
+  (list built-in + loaded `.posa` decoders; `i` import a `.posa`, `n` write a
+  new one in the built-in editor with a posa cheat-sheet panel; `^S` saves &
+  loads it).
+- **Statistics** — IO Graph (packets per interval; green = all, yellow = current
+  filter match), drawn with gtcaca's line chart.
 
 ### Display filters
 

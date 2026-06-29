@@ -103,6 +103,18 @@ cfield_t *dissect_packet(const cpkt_t *pkt);
 /* Fill pkt->col_* from a dissection (cheap summary). Safe to call repeatedly. */
 void      dissect_summarize(cpkt_t *pkt);
 
+/* Locate the transport (TCP/UDP) header + payload within a packet. Returns 1
+   when found. Integers are host order; payoff/paylen index into pkt->data. */
+typedef struct {
+  int      proto;            /* 6 = TCP, 17 = UDP */
+  uint32_t sip, dip;         /* IPv6 folded to 32 bits */
+  uint16_t sport, dport;
+  uint32_t seq;              /* TCP only */
+  uint8_t  flags;            /* TCP only */
+  int      payoff, paylen;
+} caracal_l4_t;
+int       caracal_locate_l4(const cpkt_t *pkt, caracal_l4_t *out);
+
 /* Common LINKTYPE values we understand. */
 #define LINKTYPE_NULL      0
 #define LINKTYPE_ETHERNET  1
