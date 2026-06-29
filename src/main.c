@@ -29,6 +29,7 @@
 #include <gtcaca/checkbox.h>
 #include <gtcaca/radiobutton.h>
 #include <gtcaca/button.h>
+#include <gtcaca/progressbar.h>
 #include <gtcaca/statusbar.h>
 #include <gtcaca/dialog.h>
 #include <gtcaca/filechooser.h>
@@ -89,6 +90,7 @@ typedef struct {
 
   /* layout (for mouse hit-testing) */
   int table_y, table_h, tree_y, tree_h, tree_w;
+  int show_tree, show_hex;   /* View menu: show/hide the detail panes */
 } app_t;
 
 static app_t app;
@@ -246,7 +248,7 @@ static int tn_has_children(gtcaca_tree_model_t *m, void *node)
 { (void)m; return cfield_count((cfield_t *)node) > 0; }
 
 static gtcaca_tree_model_t tree_model = {
-  tn_child_count, tn_child, tn_label, tn_has_children, NULL
+  tn_child_count, tn_child, tn_label, tn_has_children, NULL, NULL /* draw_row */
 };
 
 /* ───────────────────────── status line ────────────────────────────────── */
@@ -568,7 +570,10 @@ static void act_reload(void *u)
   load_capture(path);
 }
 
-static void act_quit(void *u) { (void)u; g_quit = 1; }
+static int confirm_quit(void)
+{ return gtcaca_dialog_confirm("Quit caracal", "Are you sure you want to quit?"); }
+
+static void act_quit(void *u) { (void)u; if (confirm_quit()) g_quit = 1; }
 
 static void act_decode_as(void *u)
 {
@@ -878,19 +883,6 @@ static void ph_free(phnode_t *n)
   for (c = n->child; c; c = nx) { nx = c->sibling; ph_free(c); }
   free(n);
 }
-static phnode_t *ph_at(phnode_t *node, int i)
-{
-  phnode_t *c = node ? node->child : (g_ph_root ? g_ph_root->child : NULL);
-  for (; c && i > 0; c = c->sibling) i--;
-  return c;
-}
-static long ph_count(phnode_t *node)
-{
-  phnode_t *c = node ? node->child : (g_ph_root ? g_ph_root->child : NULL);
-  long n = 0;
-  for (; c; c = c->sibling) n++;
-  return n;
-}
 static const char *ph_disp(const char *a)
 {
   if (!strcmp(a, "frame")) return "Frame";
@@ -905,29 +897,62 @@ static const char *ph_disp(const char *a)
   return a;
 }
 
+/* current entry resolver for the tree model */
+static phnode_t *ph_at(phnode_t *node, int i)
+{
+  phnode_t *c = node ? node->child : (g_ph_root ? g_ph_root->child : NULL);
+  for (; c && i > 0; c = c->sibling) i--;
+  return c;
+}
+static long ph_count(phnode_t *node)
+{
+  phnode_t *c = node ? node->child : (g_ph_root ? g_ph_root->child : NULL);
+  long n = 0;
+  for (; c; c = c->sibling) n++;
+  return n;
+}
+
+/* A shared progressbar widget, drawn by the cell renderer at each row's rect
+   (kept out of the global draw list — we paint it ourselves per row). */
+static gtcaca_progressbar_widget_t *g_ph_bar;
+
 static long phm_cc(gtcaca_tree_model_t *m, void *node) { (void)m; return ph_count(node); }
 static void *phm_child(gtcaca_tree_model_t *m, void *node, long i) { (void)m; return ph_at(node, (int)i); }
 static int  phm_has(gtcaca_tree_model_t *m, void *node) { phnode_t *n = node; (void)m; return n && n->child != NULL; }
 static void phm_label(gtcaca_tree_model_t *m, void *node, char *b, int len)
+{ phnode_t *n = node; (void)m; snprintf(b, len, "%s", ph_disp(n->name)); }
+
+/* Cell renderer: name + counts on the left, a real gtcaca progressbar (percent
+   of packets) on the right — a widget living inside the tree row. */
+static void ph_draw_row(gtcaca_tree_model_t *m, void *node, int x, int y, int width, int selected)
 {
   phnode_t *n = node;
-  double pp = g_ph_total_pkts ? 100.0 * (double)n->pkts / (double)g_ph_total_pkts : 0.0;
-  char bar[12];
-  int cells = 10, full = (int)(pp / 100.0 * cells + 0.5), i;
-  (void)m;
-  for (i = 0; i < cells; i++) bar[i] = i < full ? '#' : '.';
-  bar[cells] = '\0';
-  snprintf(b, len, "%-24s [%s] %5.1f%%  %7ld pkts  %9ld bytes  end:%ld",
-           ph_disp(n->name), bar, pp, n->pkts, n->bytes, n->end_pkts);
+  double pp = g_ph_total_pkts ? (double)n->pkts / (double)g_ph_total_pkts : 0.0;
+  char left[120];
+  int barw = width * 42 / 100, leftw;
+  (void)m; (void)selected;
+  if (barw < 14) barw = 14;
+  if (barw > width - 6) barw = width > 6 ? width - 6 : 0;
+  leftw = width - barw - 1; if (leftw < 4) leftw = 4;
+  snprintf(left, sizeof left, "%s  %ld pk %ld B", ph_disp(n->name), n->pkts, n->bytes);
+  if ((int)strlen(left) > leftw) left[leftw] = '\0';
+  caca_put_str(gmo.cv, x, y, left);           /* inherits the row colour set by the tree */
+  if (g_ph_bar && barw >= 8) {
+    g_ph_bar->x = x + leftw + 1; g_ph_bar->y = y; g_ph_bar->width = barw;
+    gtcaca_progressbar_set_value(g_ph_bar, (float)pp);
+    gtcaca_progressbar_draw(g_ph_bar);
+  }
 }
-static gtcaca_tree_model_t ph_model = { phm_cc, phm_child, phm_label, phm_has, NULL };
+static gtcaca_tree_model_t ph_model = { phm_cc, phm_child, phm_label, phm_has, NULL, ph_draw_row };
 
+/* Protocol Hierarchy: an expandable tree whose rows host a real progressbar
+   widget via the tree's cell-renderer delegate. */
 static void act_proto_stats(void *u)
 {
   gtcaca_window_widget_t *win;
   gtcaca_tree_widget_t *tree;
   int w, h;
-  long i;
+  long k;
   caca_event_t ev;
   (void)u;
 
@@ -935,8 +960,8 @@ static void act_proto_stats(void *u)
 
   g_ph_root = calloc(1, sizeof *g_ph_root);
   g_ph_total_pkts = app.nview;
-  for (i = 0; i < app.nview; i++) {
-    cpkt_t *p = &app.cap.pkts[view_pkt_index(i)];
+  for (k = 0; k < app.nview; k++) {
+    cpkt_t *p = &app.cap.pkts[view_pkt_index(k)];
     cfield_t *root = dissect_packet(p);
     phnode_t *cur = g_ph_root, *last = NULL;
     int j, nc;
@@ -956,21 +981,25 @@ static void act_proto_stats(void *u)
     cfield_free(root);
   }
 
-  win  = modal_window("Protocol Hierarchy Statistics", &w, &h);
+  win = modal_window("Protocol Hierarchy Statistics", &w, &h);
+  /* a standalone progressbar the cell renderer repositions per row */
+  g_ph_bar = gtcaca_progressbar_new(NULL, 0, 0, 10);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(g_ph_bar));
   tree = gtcaca_tree_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 2);
   gtcaca_tree_set_model(tree, &ph_model);
   gtcaca_tree_set_title(tree, "Protocol  (Right/Enter expand, Esc close)");
   tree->has_focus = 1;
   for (;;) {
-    int k;
+    int key;
     gtcaca_redraw();
     if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
-    k = caca_get_event_key_ch(&ev);
-    if (k == CACA_KEY_ESCAPE || k == 'q') break;
-    gtcaca_tree_key(tree, k, NULL);
+    key = caca_get_event_key_ch(&ev);
+    if (key == CACA_KEY_ESCAPE || key == 'q') break;
+    gtcaca_tree_key(tree, key, NULL);
   }
   CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tree)); gtcaca_tree_free(tree);
   CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
+  free(g_ph_bar); g_ph_bar = NULL;
   ph_free(g_ph_root); g_ph_root = NULL;
   modal_close_menu();
 }
@@ -1129,6 +1158,66 @@ static void act_decoders(void *u)
   if (open_editor) act_posa_new(NULL);
 }
 
+/* ───────────────────────── View: show/hide detail panes ───────────────── */
+static int g_view_entry = -1, g_item_details, g_item_bytes;
+
+/* Recompute geometry from the show_tree/show_hex flags: the packet table grows
+   to fill whatever the detail panes give up. */
+static void relayout(void)
+{
+  int W = caca_get_canvas_width(gmo.cv), H = caca_get_canvas_height(gmo.cv);
+  int top = 2, bottom = H - 1;            /* below filter row, above status */
+  int shown = (app.show_tree ? 1 : 0) + (app.show_hex && app.hex ? 1 : 0);
+  int th, dy, dh;
+
+  th = (shown == 0) ? (bottom - top) : (bottom - top) * 55 / 100;
+  if (th < 4) th = 4;
+  app.table_y = top; app.table_h = th;
+  app.table->x = 0; app.table->y = top; app.table->width = W; app.table->height = th;
+  app.table->is_visible = 1;
+
+  dy = top + th; dh = bottom - dy; if (dh < 3) dh = 3;
+  app.tree_y = dy; app.tree_h = dh;
+
+  if (app.tree) app.tree->is_visible = 0;
+  if (app.hex)  app.hex->is_visible  = 0;
+
+  if (app.show_tree && app.show_hex && app.hex) {
+    int tw = W * 60 / 100;
+    app.tree_w = tw;
+    app.tree->x = 0; app.tree->y = dy; app.tree->width = tw; app.tree->height = dh; app.tree->is_visible = 1;
+    app.hex->x = tw; app.hex->y = dy; app.hex->width = W - tw; app.hex->height = dh; app.hex->is_visible = 1;
+  } else if (app.show_tree) {
+    app.tree_w = W;
+    app.tree->x = 0; app.tree->y = dy; app.tree->width = W; app.tree->height = dh; app.tree->is_visible = 1;
+  } else if (app.show_hex && app.hex) {
+    app.hex->x = 0; app.hex->y = dy; app.hex->width = W; app.hex->height = dh; app.hex->is_visible = 1;
+  }
+
+  /* don't leave focus on a hidden pane */
+  if (app.focus == FOCUS_TREE && !app.show_tree) app.focus = FOCUS_TABLE;
+  if (app.focus == FOCUS_HEX  && !(app.show_hex && app.hex)) app.focus = FOCUS_TABLE;
+}
+
+static void update_view_labels(void)
+{
+  if (g_view_entry < 0 || !app.menu) return;
+  snprintf(app.menu->entries[g_view_entry].items[g_item_details].label, GTCACA_MENU_LABEL_MAX,
+           "[%c] Packet Details", app.show_tree ? 'x' : ' ');
+  snprintf(app.menu->entries[g_view_entry].items[g_item_bytes].label, GTCACA_MENU_LABEL_MAX,
+           "[%c] Packet Bytes", (app.show_hex && app.hex) ? 'x' : ' ');
+}
+
+static void act_toggle_details(void *u)
+{ (void)u; app.show_tree = !app.show_tree; relayout(); update_view_labels(); }
+
+static void act_toggle_bytes(void *u)
+{
+  (void)u;
+  if (!app.hex) { gtcaca_dialog_message("Packet Bytes", "The byte pane needs a wider terminal."); return; }
+  app.show_hex = !app.show_hex; relayout(); update_view_labels();
+}
+
 static void build_menu(void)
 {
   int e;
@@ -1144,6 +1233,10 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Find Packet\xe2\x80\xa6", "^F", act_find,      NULL);
   gtcaca_menu_add_item(app.menu, e, "Find Next",            "n",   act_find_next, NULL);
   gtcaca_menu_add_item(app.menu, e, "Find Previous",        "N",   act_find_prev, NULL);
+
+  g_view_entry  = gtcaca_menu_add_entry(app.menu, "View");
+  g_item_details = gtcaca_menu_add_item(app.menu, g_view_entry, "[x] Packet Details", "", act_toggle_details, NULL);
+  g_item_bytes   = gtcaca_menu_add_item(app.menu, g_view_entry, "[x] Packet Bytes",   "", act_toggle_bytes,   NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Analyze");
   gtcaca_menu_add_item(app.menu, e, "Follow TCP Stream",    "",    act_follow_tcp, NULL);
@@ -1406,6 +1499,12 @@ int main(int argc, char **argv)
 
   app.bar = gtcaca_statusbar_new("");
 
+  /* both detail panes shown by default; relayout sizes everything */
+  app.show_tree = 1;
+  app.show_hex  = (app.hex != NULL);
+  relayout();
+  update_view_labels();
+
   /* Open a file passed on the command line. */
   if (argc > 1) load_capture(argv[1]);
   else { app.filter = filter_compile("", NULL, 0); }
@@ -1461,7 +1560,7 @@ int main(int argc, char **argv)
     /* global keys */
     if (key == CACA_KEY_F10) { app.menu->has_focus = 1; app.menu->active_entry = 0; app.menu->is_open = 0; redraw(); continue; }
     if (key == CACA_KEY_F2)  { act_open(NULL); redraw(); continue; }
-    if (key == CTRL('q'))    { break; }
+    if (key == CTRL('q'))    { if (confirm_quit()) break; redraw(); continue; }
     if (key == CTRL('o'))    { act_open(NULL); redraw(); continue; }
     if (key == CTRL('f'))    { act_find(NULL); redraw(); continue; }
     if (key == '\t') {
@@ -1490,7 +1589,7 @@ int main(int argc, char **argv)
     if (app.find_active && (key == 'n' || key == 'N')) {
       find_jump(key == 'n' ? +1 : -1); redraw(); continue;
     }
-    if (key == 'q' || key == 'Q') { break; }
+    if (key == 'q' || key == 'Q') { if (confirm_quit()) break; redraw(); continue; }
 
     if      (app.focus == FOCUS_TABLE) gtcaca_table_key(app.table, key, NULL);
     else if (app.focus == FOCUS_HEX && app.hex) gtcaca_hexview_key(app.hex, key, NULL);
