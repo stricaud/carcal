@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 
 #include <caca.h>
 
@@ -25,6 +26,9 @@
 #include <gtcaca/tree.h>
 #include <gtcaca/entry.h>
 #include <gtcaca/label.h>
+#include <gtcaca/checkbox.h>
+#include <gtcaca/radiobutton.h>
+#include <gtcaca/button.h>
 #include <gtcaca/statusbar.h>
 #include <gtcaca/dialog.h>
 #include <gtcaca/filechooser.h>
@@ -32,6 +36,9 @@
 #include <gtcaca/textview.h>
 #include <gtcaca/editor.h>
 #include <gtcaca/linechart.h>
+#include <gtcaca/hexview.h>
+#include <gtcaca/tree.h>
+#include <gtcaca/gauge.h>
 
 #include <libpcapng/reassembly_tcp.h>   /* pcapng_tcp_reasm_* for Follow TCP Stream */
 
@@ -41,10 +48,13 @@
 #ifndef CARACAL_PROTOS_DIR
 #define CARACAL_PROTOS_DIR "protos"
 #endif
+#ifndef CARACAL_GRAMMARS_DIR
+#define CARACAL_GRAMMARS_DIR "grammars"
+#endif
 
 #define CTRL(c) ((c) & 0x1f)
 
-enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE };
+enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE, FOCUS_HEX, FOCUS_COUNT };
 
 typedef struct {
   capture_t cap;
@@ -65,7 +75,8 @@ typedef struct {
   gtcaca_entry_widget_t     *fentry;
   gtcaca_table_widget_t     *table;
   gtcaca_tree_widget_t      *tree;
-  gtcaca_textview_widget_t  *hex;     /* byte pane for the selected packet */
+  gtcaca_hexview_widget_t   *hex;     /* byte pane for the selected packet */
+  gtcaca_gauge_widget_t     *matchbar;/* filter-match ratio gauge          */
   gtcaca_statusbar_widget_t *bar;
 
   /* find-packet state */
@@ -73,6 +84,7 @@ typedef struct {
   int      find_len;
   char     find_str[256];
   int      find_is_hex;
+  int      find_nocase;     /* case-insensitive search */
   int      find_active;
 
   /* layout (for mouse hit-testing) */
@@ -80,6 +92,7 @@ typedef struct {
 } app_t;
 
 static app_t app;
+static int   g_quit = 0;   /* set by File > Quit; the event loop checks it */
 
 /* ───────────────────────── view (filtered index list) ─────────────────── */
 static void view_push(long idx)
@@ -130,32 +143,32 @@ static void detail_clear(void)
 
 static gtcaca_tree_model_t tree_model;   /* defined below */
 
-/* Wireshark-style byte pane: "offset  hh hh … hh  |ascii|" lines. */
+/* Point the hex byte pane at the selected packet's bytes. */
 static void hex_fill(const cpkt_t *p)
 {
-  char line[160];
-  long off;
-  int i, n;
+  char t[40];
   if (!app.hex) return;
-  gtcaca_textview_clear(app.hex);
-  if (!p) return;
-  for (off = 0; off < (long)p->caplen; off += 16) {
-    int o = 0;
-    o += snprintf(line + o, sizeof line - o, "%04lx  ", off);
-    n = (int)(p->caplen - off); if (n > 16) n = 16;
-    for (i = 0; i < 16; i++) {
-      if (i < n) o += snprintf(line + o, sizeof line - o, "%02x ", p->data[off + i]);
-      else       o += snprintf(line + o, sizeof line - o, "   ");
-      if (i == 7) o += snprintf(line + o, sizeof line - o, " ");
-    }
-    o += snprintf(line + o, sizeof line - o, " |");
-    for (i = 0; i < n; i++) {
-      uint8_t b = p->data[off + i];
-      line[o++] = (b >= 32 && b < 127) ? (char)b : '.';
-    }
-    line[o++] = '|'; line[o] = '\0';
-    gtcaca_textview_append(app.hex, line);
+  if (p) {
+    gtcaca_hexview_set_data(app.hex, p->data, (int)p->caplen);
+    snprintf(t, sizeof t, "Bytes (%u)", p->caplen);
+    gtcaca_hexview_set_title(app.hex, t);
+  } else {
+    gtcaca_hexview_set_data(app.hex, NULL, 0);
+    gtcaca_hexview_set_title(app.hex, "Bytes");
   }
+  gtcaca_hexview_set_highlight(app.hex, -1, 0);
+}
+
+/* Highlight, in the hex pane, the bytes of the field selected in the tree
+   (climbing to the nearest ancestor that carries a byte range). */
+static void hex_sync_highlight(void)
+{
+  cfield_t *n;
+  if (!app.hex || !app.tree) return;
+  n = (cfield_t *)gtcaca_tree_selected_node(app.tree);
+  while (n && n->len <= 0) n = n->parent;
+  if (n && n->len > 0) gtcaca_hexview_set_highlight(app.hex, n->off, n->len);
+  else                 gtcaca_hexview_set_highlight(app.hex, -1, 0);
 }
 
 static void detail_rebuild(long row)
@@ -241,7 +254,8 @@ static void refresh_status(void)
 {
   char s[320];
   const char *focusname = app.focus == FOCUS_FILTER ? "filter"
-                        : app.focus == FOCUS_TABLE  ? "table" : "tree";
+                        : app.focus == FOCUS_TABLE  ? "table"
+                        : app.focus == FOCUS_TREE   ? "tree" : "hex";
   if (app.cap.count == 0) {
     snprintf(s, sizeof s, " No capture  |  F2 Open  F10 Menu  Tab switch  ^Q quit");
   } else {
@@ -272,11 +286,46 @@ static void apply_filter(const char *expr)
 }
 
 /* ───────────────────────── capture loading ────────────────────────────── */
+/* progress callback driving the load gauge (throttled to ~2% steps) */
+static double g_loadlast;
+static void loadbar_cb(void *ud, double frac)
+{
+  gtcaca_gauge_widget_t *g = ud;
+  if (frac < g_loadlast + 0.02 && frac < 1.0) return;
+  g_loadlast = frac;
+  gtcaca_gauge_set_value(g, (float)frac);
+  gtcaca_redraw();
+}
+
 static void load_capture(const char *path)
 {
   capture_t nc;
   char err[256] = "";
-  if (capture_load(path, &nc, err, sizeof err) != 0) {
+  int rc;
+  struct stat st;
+  gtcaca_window_widget_t *lwin = NULL;
+  gtcaca_gauge_widget_t  *lg = NULL;
+
+  /* For a sizeable file, show a modal load-progress gauge. */
+  if (gmo.cv && stat(path, &st) == 0 && st.st_size > (1 << 20)) {
+    int W = caca_get_canvas_width(gmo.cv), w = 46;
+    if (w > W - 2) w = W - 2;
+    lwin = gtcaca_window_new_centered(NULL, "Loading capture", w, 5);
+    lg   = gtcaca_gauge_new(GTCACA_WIDGET(lwin), 2, 2, w - 4);
+    gtcaca_gauge_set_colors(lg, CACA_GREEN, CACA_BLUE);
+    g_loadlast = -1.0;
+    capture_set_progress(loadbar_cb, lg);
+  }
+
+  rc = capture_load(path, &nc, err, sizeof err);
+
+  if (lg) {
+    capture_set_progress(NULL, NULL);
+    CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(lg));   gtcaca_gauge_free(lg);
+    CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(lwin)); free(lwin);
+  }
+
+  if (rc != 0) {
     gtcaca_dialog_message("Open failed", err[0] ? err : "could not read file");
     return;
   }
@@ -324,6 +373,19 @@ static const uint8_t *mem_find(const uint8_t *hay, int hlen, const uint8_t *need
   return NULL;
 }
 
+/* case-insensitive byte search (ASCII letters folded) */
+static const uint8_t *ci_mem_find(const uint8_t *hay, int hlen, const uint8_t *need, int nlen)
+{
+  int i, j;
+  if (nlen <= 0 || nlen > hlen) return NULL;
+  for (i = 0; i <= hlen - nlen; i++) {
+    for (j = 0; j < nlen; j++)
+      if (tolower(hay[i + j]) != tolower(need[j])) break;
+    if (j == nlen) return hay + i;
+  }
+  return NULL;
+}
+
 static int hexparse(const char *s, uint8_t *out, int max)
 {
   int n = 0;
@@ -358,13 +420,19 @@ static int ci_contains(const char *hay, const char *needle)
 static int pkt_find_match(long pidx)
 {
   cpkt_t *p = &app.cap.pkts[pidx];
-  if (app.find_len > 0 &&
-      mem_find(p->data, (int)p->caplen, app.find_bytes, app.find_len)) return 1;
+  if (app.find_len > 0) {
+    const uint8_t *hit = app.find_nocase
+      ? ci_mem_find(p->data, (int)p->caplen, app.find_bytes, app.find_len)
+      : mem_find(p->data, (int)p->caplen, app.find_bytes, app.find_len);
+    if (hit) return 1;
+  }
   if (!app.find_is_hex && app.find_str[0]) {        /* text also matches columns */
     dissect_summarize(p);
-    if (ci_contains(p->col_info, app.find_str) || ci_contains(p->col_src, app.find_str) ||
-        ci_contains(p->col_dst, app.find_str)  || ci_contains(p->col_proto, app.find_str))
-      return 1;
+    if (app.find_nocase)
+      return ci_contains(p->col_info, app.find_str) || ci_contains(p->col_src, app.find_str) ||
+             ci_contains(p->col_dst, app.find_str)  || ci_contains(p->col_proto, app.find_str);
+    return strstr(p->col_info, app.find_str) || strstr(p->col_src, app.find_str) ||
+           strstr(p->col_dst, app.find_str)  || strstr(p->col_proto, app.find_str);
   }
   return 0;
 }
@@ -387,24 +455,96 @@ static int find_jump(int dir)
   return 0;
 }
 
+/* Modal Find dialog: text entry, String/Hex radios, Case-sensitive and
+   Search-backwards checkboxes, and Find/Cancel buttons. */
 static void act_find(void *u)
 {
-  char in[256];
+  int W = caca_get_canvas_width(gmo.cv), H = caca_get_canvas_height(gmo.cv);
+  int w = 54, h = 12, f = 0, result = 0, i, hexerr = 0, back = 0;
+  gtcaca_window_widget_t *win;
+  gtcaca_label_widget_t *lbl;
+  gtcaca_entry_widget_t *ent;
+  gtcaca_radiobutton_widget_t *rbs, *rbh;
+  gtcaca_checkbox_widget_t *cbcase, *cbback;
+  gtcaca_button_widget_t *bfind, *bcancel;
+  gtcaca_widget_t *ring[7];
+  caca_event_t ev;
   (void)u;
-  if (!prompt_line("Find (text, or 'hex:DE AD BE EF'):  ", in, sizeof in)) return;
-  if (strncmp(in, "hex:", 4) == 0) {
-    int n = hexparse(in + 4, app.find_bytes, (int)sizeof app.find_bytes);
-    if (n <= 0) { gtcaca_dialog_message("Find", "Invalid hex bytes."); return; }
-    app.find_len = n; app.find_is_hex = 1; app.find_str[0] = '\0';
-  } else {
-    int n = (int)strlen(in);
-    if (n > (int)sizeof app.find_bytes) n = (int)sizeof app.find_bytes;
-    memcpy(app.find_bytes, in, (size_t)n);
-    app.find_len = n; app.find_is_hex = 0;
-    snprintf(app.find_str, sizeof app.find_str, "%s", in);
+
+  if (w > W - 2) w = W - 2;
+  if (h > H - 2) h = H - 2;
+  win    = gtcaca_window_new_centered(NULL, "Find Packet", w, h);
+  lbl    = gtcaca_label_new(GTCACA_WIDGET(win), "Find:", 2, 1);
+  ent    = gtcaca_entry_new(GTCACA_WIDGET(win), 8, 1, w - 10);
+  if (app.find_str[0]) gtcaca_entry_set_text(ent, app.find_str);
+  rbs    = gtcaca_radiobutton_new(GTCACA_WIDGET(win), "String",     1, 3, 3);
+  rbh    = gtcaca_radiobutton_new(GTCACA_WIDGET(win), "Hex value",  1, 18, 3);
+  if (app.find_is_hex) gtcaca_radiobutton_set_active(rbh);
+  else                 gtcaca_radiobutton_set_active(rbs);
+  cbcase = gtcaca_checkbox_new(GTCACA_WIDGET(win), "Case sensitive",   2, 5);
+  cbback = gtcaca_checkbox_new(GTCACA_WIDGET(win), "Search backwards", 2, 6);
+  if (app.find_active && !app.find_nocase) gtcaca_checkbox_set_checked(cbcase, 1);
+  bfind   = gtcaca_button_new(GTCACA_WIDGET(win), "Find",   2, 8);
+  bcancel = gtcaca_button_new(GTCACA_WIDGET(win), "Cancel", 12, 8);
+  (void)lbl;
+
+  ring[0] = GTCACA_WIDGET(ent);  ring[1] = GTCACA_WIDGET(rbs);  ring[2] = GTCACA_WIDGET(rbh);
+  ring[3] = GTCACA_WIDGET(cbcase); ring[4] = GTCACA_WIDGET(cbback);
+  ring[5] = GTCACA_WIDGET(bfind);  ring[6] = GTCACA_WIDGET(bcancel);
+
+  while (result == 0) {
+    int k;
+    for (i = 0; i < 7; i++) ring[i]->has_focus = (i == f);
+    gtcaca_redraw();
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    if (k == CACA_KEY_ESCAPE) { result = 2; break; }
+    if (k == '\t' || k == CACA_KEY_DOWN) { f = (f + 1) % 7; continue; }
+    if (k == CACA_KEY_UP)                { f = (f + 6) % 7; continue; }
+    if (k == CACA_KEY_RETURN || k == 10) { result = (ring[f] == GTCACA_WIDGET(bcancel)) ? 2 : 1; break; }
+    if (ring[f] == GTCACA_WIDGET(ent)) { ent->private_key_cb(ent, k, NULL); continue; }
+    if (k == ' ') {
+      if      (ring[f] == GTCACA_WIDGET(rbs)) gtcaca_radiobutton_set_active(rbs);
+      else if (ring[f] == GTCACA_WIDGET(rbh)) gtcaca_radiobutton_set_active(rbh);
+      else if (ring[f] == GTCACA_WIDGET(cbcase)) gtcaca_checkbox_set_checked(cbcase, !gtcaca_checkbox_get_checked(cbcase));
+      else if (ring[f] == GTCACA_WIDGET(cbback)) gtcaca_checkbox_set_checked(cbback, !gtcaca_checkbox_get_checked(cbback));
+    }
   }
-  app.find_active = 1;
-  if (!find_jump(+1)) gtcaca_dialog_message("Find", "No match.");
+
+  if (result == 1) {
+    const char *txt = gtcaca_entry_get_text(ent);
+    int hex = gtcaca_radiobutton_get_active(rbh);
+    back = gtcaca_checkbox_get_checked(cbback);
+    if (hex) {
+      int n = hexparse(txt, app.find_bytes, (int)sizeof app.find_bytes);
+      if (n <= 0) hexerr = 1;
+      else { app.find_len = n; app.find_is_hex = 1; app.find_str[0] = '\0'; }
+    } else {
+      int n = (int)strlen(txt);
+      if (n > (int)sizeof app.find_bytes) n = (int)sizeof app.find_bytes;
+      memcpy(app.find_bytes, txt, (size_t)n);
+      app.find_len = n; app.find_is_hex = 0;
+      snprintf(app.find_str, sizeof app.find_str, "%s", txt);
+    }
+    app.find_nocase = !gtcaca_checkbox_get_checked(cbcase);
+    if (!hexerr) app.find_active = (app.find_len > 0);
+  }
+
+  /* teardown */
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(bcancel)); free(bcancel);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(bfind));   free(bfind);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(cbback));  free(cbback);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(cbcase));  free(cbcase);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(rbh));     free(rbh);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(rbs));     free(rbs);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(ent));     free(ent);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(lbl));     free(lbl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));     free(win);
+  if (app.menu) { app.menu->is_open = 0; app.menu->has_focus = 0; }
+
+  if (hexerr) { gtcaca_dialog_message("Find", "Invalid hex bytes."); return; }
+  if (result == 1 && app.find_active && !find_jump(back ? -1 : +1))
+    gtcaca_dialog_message("Find", "No match.");
 }
 
 static void act_find_next(void *u) { (void)u; if (app.find_active) find_jump(+1); }
@@ -428,26 +568,7 @@ static void act_reload(void *u)
   load_capture(path);
 }
 
-static void act_quit(void *u) { (void)u; gtcaca_main_quit(); }
-
-static void act_load_posa(void *u)
-{
-  char path[1024], err[160] = "", msg[256];
-  int rc;
-  (void)u;
-  if (!gtcaca_filechooser_run(".", path, sizeof path, 0)) return;
-  rc = posa_load_file(path, err, sizeof err);
-  if (rc < 0) {
-    gtcaca_dialog_message("Load .posa failed", err[0] ? err : "parse error");
-    return;
-  }
-  invalidate_summaries();
-  view_rebuild();
-  detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0);
-  snprintf(msg, sizeof msg, "Loaded %d protocol(s). %d total available.",
-           rc, posa_count());
-  gtcaca_dialog_message("Protocols loaded", msg);
-}
+static void act_quit(void *u) { (void)u; g_quit = 1; }
 
 static void act_decode_as(void *u)
 {
@@ -730,6 +851,130 @@ static void act_io_graph(void *u)
   modal_close_menu();
 }
 
+/* ── Protocol Hierarchy statistics (cf. Wireshark) ──────────────────────── */
+typedef struct phnode {
+  char name[32];
+  long pkts, bytes, end_pkts, end_bytes;
+  struct phnode *child, *sibling;
+} phnode_t;
+
+static phnode_t *g_ph_root;
+static long      g_ph_total_pkts;
+
+static phnode_t *ph_child(phnode_t *parent, const char *name)
+{
+  phnode_t *c, *last = NULL;
+  for (c = parent->child; c; c = c->sibling) { if (!strcmp(c->name, name)) return c; last = c; }
+  c = calloc(1, sizeof *c);
+  if (!c) return NULL;
+  snprintf(c->name, sizeof c->name, "%s", name);
+  if (last) last->sibling = c; else parent->child = c;
+  return c;
+}
+static void ph_free(phnode_t *n)
+{
+  phnode_t *c, *nx;
+  if (!n) return;
+  for (c = n->child; c; c = nx) { nx = c->sibling; ph_free(c); }
+  free(n);
+}
+static phnode_t *ph_at(phnode_t *node, int i)
+{
+  phnode_t *c = node ? node->child : (g_ph_root ? g_ph_root->child : NULL);
+  for (; c && i > 0; c = c->sibling) i--;
+  return c;
+}
+static long ph_count(phnode_t *node)
+{
+  phnode_t *c = node ? node->child : (g_ph_root ? g_ph_root->child : NULL);
+  long n = 0;
+  for (; c; c = c->sibling) n++;
+  return n;
+}
+static const char *ph_disp(const char *a)
+{
+  if (!strcmp(a, "frame")) return "Frame";
+  if (!strcmp(a, "eth"))   return "Ethernet";
+  if (!strcmp(a, "ip"))    return "Internet Protocol v4";
+  if (!strcmp(a, "ipv6"))  return "Internet Protocol v6";
+  if (!strcmp(a, "udp"))   return "User Datagram Protocol";
+  if (!strcmp(a, "tcp"))   return "Transmission Control Protocol";
+  if (!strcmp(a, "ntp"))   return "Network Time Protocol";
+  if (!strcmp(a, "dns"))   return "Domain Name System";
+  if (!strcmp(a, "data"))  return "Data";
+  return a;
+}
+
+static long phm_cc(gtcaca_tree_model_t *m, void *node) { (void)m; return ph_count(node); }
+static void *phm_child(gtcaca_tree_model_t *m, void *node, long i) { (void)m; return ph_at(node, (int)i); }
+static int  phm_has(gtcaca_tree_model_t *m, void *node) { phnode_t *n = node; (void)m; return n && n->child != NULL; }
+static void phm_label(gtcaca_tree_model_t *m, void *node, char *b, int len)
+{
+  phnode_t *n = node;
+  double pp = g_ph_total_pkts ? 100.0 * (double)n->pkts / (double)g_ph_total_pkts : 0.0;
+  char bar[12];
+  int cells = 10, full = (int)(pp / 100.0 * cells + 0.5), i;
+  (void)m;
+  for (i = 0; i < cells; i++) bar[i] = i < full ? '#' : '.';
+  bar[cells] = '\0';
+  snprintf(b, len, "%-24s [%s] %5.1f%%  %7ld pkts  %9ld bytes  end:%ld",
+           ph_disp(n->name), bar, pp, n->pkts, n->bytes, n->end_pkts);
+}
+static gtcaca_tree_model_t ph_model = { phm_cc, phm_child, phm_label, phm_has, NULL };
+
+static void act_proto_stats(void *u)
+{
+  gtcaca_window_widget_t *win;
+  gtcaca_tree_widget_t *tree;
+  int w, h;
+  long i;
+  caca_event_t ev;
+  (void)u;
+
+  if (app.nview == 0) { gtcaca_dialog_message("Protocol Hierarchy", "No packets to summarise."); return; }
+
+  g_ph_root = calloc(1, sizeof *g_ph_root);
+  g_ph_total_pkts = app.nview;
+  for (i = 0; i < app.nview; i++) {
+    cpkt_t *p = &app.cap.pkts[view_pkt_index(i)];
+    cfield_t *root = dissect_packet(p);
+    phnode_t *cur = g_ph_root, *last = NULL;
+    int j, nc;
+    if (!root) continue;
+    nc = cfield_count(root);
+    for (j = 0; j < nc; j++) {
+      cfield_t *ch = cfield_child_at(root, j);
+      phnode_t *pn;
+      if (!ch->abbrev[0] || ch->vtype != CV_NONE) continue;   /* protocol layers only */
+      pn = ph_child(cur, ch->abbrev);
+      if (!pn) break;
+      pn->pkts++;
+      pn->bytes += ch->len > 0 ? ch->len : 0;
+      cur = pn; last = pn;
+    }
+    if (last) { last->end_pkts++; last->end_bytes += p->origlen; }
+    cfield_free(root);
+  }
+
+  win  = modal_window("Protocol Hierarchy Statistics", &w, &h);
+  tree = gtcaca_tree_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 2);
+  gtcaca_tree_set_model(tree, &ph_model);
+  gtcaca_tree_set_title(tree, "Protocol  (Right/Enter expand, Esc close)");
+  tree->has_focus = 1;
+  for (;;) {
+    int k;
+    gtcaca_redraw();
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    if (k == CACA_KEY_ESCAPE || k == 'q') break;
+    gtcaca_tree_key(tree, k, NULL);
+  }
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tree)); gtcaca_tree_free(tree);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
+  ph_free(g_ph_root); g_ph_root = NULL;
+  modal_close_menu();
+}
+
 /* ── posa editor (with a help panel) ────────────────────────────────────── */
 static const char POSA_TEMPLATE[] =
   "# A custom protocol decoder (.posa).\n"
@@ -757,6 +1002,7 @@ static void act_posa_new(void *u)
   gtcaca_window_widget_t *win;
   gtcaca_editor_widget_t *ed;
   gtcaca_textview_widget_t *help;
+  gtcaca_editor_grammar_t *grammar;
   int w, h, edw, i;
   caca_event_t ev;
   (void)u;
@@ -765,6 +1011,9 @@ static void act_posa_new(void *u)
   edw = w * 62 / 100; if (edw < 20) edw = w - 2;
   ed  = gtcaca_editor_new(GTCACA_WIDGET(win), 1, 1, edw, h - 2);
   gtcaca_editor_set_text(ed, POSA_TEMPLATE);
+  /* TextMate-grammar syntax colouring (needs gtcaca built with Oniguruma). */
+  grammar = gtcaca_editor_grammar_load(CARACAL_GRAMMARS_DIR "/posa.tmLanguage.json");
+  if (grammar) gtcaca_editor_set_grammar(ed, grammar);
   help = (edw < w - 4)
        ? gtcaca_textview_new(GTCACA_WIDGET(win), edw + 2, 1, w - edw - 3, h - 2) : NULL;
   if (help)
@@ -802,7 +1051,9 @@ static void act_posa_new(void *u)
   }
 
   if (help) tv_destroy(help);
+  if (grammar) gtcaca_editor_set_grammar(ed, NULL);
   CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(ed)); gtcaca_editor_free(ed);
+  if (grammar) gtcaca_editor_grammar_free(grammar);
   CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
   modal_close_menu();
 }
@@ -887,8 +1138,6 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Open\xe2\x80\xa6",     "F2",  act_open,      NULL);
   gtcaca_menu_add_item(app.menu, e, "Reload",               "",    act_reload,    NULL);
   gtcaca_menu_add_separator(app.menu, e);
-  gtcaca_menu_add_item(app.menu, e, "Load .posa\xe2\x80\xa6", "",  act_load_posa, NULL);
-  gtcaca_menu_add_separator(app.menu, e);
   gtcaca_menu_add_item(app.menu, e, "Quit",                 "^Q",  act_quit,      NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Edit");
@@ -904,6 +1153,7 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Decoders\xe2\x80\xa6",  "",   act_decoders,  NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Statistics");
+  gtcaca_menu_add_item(app.menu, e, "Protocol Hierarchy",   "",    act_proto_stats, NULL);
   gtcaca_menu_add_item(app.menu, e, "IO Graph",             "",    act_io_graph,  NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Help");
@@ -916,6 +1166,7 @@ static void sync_focus(void)
   if (app.fentry) app.fentry->has_focus = (app.focus == FOCUS_FILTER);
   if (app.table)  app.table->has_focus  = (app.focus == FOCUS_TABLE);
   if (app.tree)   app.tree->has_focus   = (app.focus == FOCUS_TREE);
+  if (app.hex)    app.hex->has_focus    = (app.focus == FOCUS_HEX);
 }
 
 static void redraw(void)
@@ -924,6 +1175,15 @@ static void redraw(void)
   if (app.table) {
     long sel = gtcaca_table_selected_row(app.table);
     if (sel != app.detail_for) detail_rebuild(sel);
+  }
+  hex_sync_highlight();
+  if (app.matchbar) {
+    char lbl[24];
+    long total = app.cap.count;
+    float frac = total ? (float)app.nview / (float)total : 1.0f;
+    snprintf(lbl, sizeof lbl, "%ld/%ld", app.nview, total);
+    gtcaca_gauge_set_value(app.matchbar, frac);
+    gtcaca_gauge_set_label(app.matchbar, lbl);
   }
   sync_focus();
   refresh_status();
@@ -1103,7 +1363,15 @@ int main(int argc, char **argv)
   build_menu();
 
   gtcaca_label_new(GTCACA_WIDGET(win), "Filter:", 0, 1);
-  app.fentry = gtcaca_entry_new(GTCACA_WIDGET(win), 8, 1, W - 9);
+  if (W >= 60) {
+    int gw = 18;                       /* filter-match gauge at the right */
+    app.fentry = gtcaca_entry_new(GTCACA_WIDGET(win), 8, 1, W - 9 - gw - 1);
+    app.matchbar = gtcaca_gauge_new(GTCACA_WIDGET(win), W - gw, 1, gw);
+    gtcaca_gauge_set_colors(app.matchbar, CACA_GREEN, CACA_BLUE);
+    gtcaca_gauge_set_value(app.matchbar, 1.0f);
+  } else {
+    app.fentry = gtcaca_entry_new(GTCACA_WIDGET(win), 8, 1, W - 9);
+  }
 
   app.table_y = 2;
   app.table_h = (H - 4) * 55 / 100;
@@ -1131,8 +1399,9 @@ int main(int argc, char **argv)
   gtcaca_tree_set_title(app.tree, "Packet details");
 
   if (app.tree_w < W) {
-    app.hex = gtcaca_textview_new(GTCACA_WIDGET(win), app.tree_w, app.tree_y,
-                                  W - app.tree_w, app.tree_h);
+    app.hex = gtcaca_hexview_new(GTCACA_WIDGET(win), app.tree_w, app.tree_y,
+                                 W - app.tree_w, app.tree_h);
+    gtcaca_hexview_set_title(app.hex, "Bytes");
   }
 
   app.bar = gtcaca_statusbar_new("");
@@ -1146,7 +1415,7 @@ int main(int argc, char **argv)
   /* ── event loop ──────────────────────────────────────────────────────── */
   caca_set_mouse(gmo.dp, 1);
   redraw();
-  while (1) {
+  while (!g_quit) {
     caca_event_t ev;
     int t, key;
 
@@ -1157,13 +1426,16 @@ int main(int argc, char **argv)
 
     if (t & CACA_EVENT_MOUSE_PRESS) {
       int b  = caca_get_event_mouse_button(&ev);
+      int mx = caca_get_mouse_x(gmo.dp);
       int my = caca_get_mouse_y(gmo.dp);
       if (b == 4 || b == 5) {                       /* wheel → scroll focused */
         int k = (b == 4) ? CACA_KEY_DOWN : CACA_KEY_UP;
-        if (app.focus == FOCUS_TREE) gtcaca_tree_key(app.tree, k, NULL);
-        else                         gtcaca_table_key(app.table, k, NULL);
+        if (app.focus == FOCUS_TREE)              gtcaca_tree_key(app.tree, k, NULL);
+        else if (app.focus == FOCUS_HEX && app.hex) gtcaca_hexview_key(app.hex, k, NULL);
+        else                                      gtcaca_table_key(app.table, k, NULL);
       } else if (b == 1) {                          /* left click → focus pane */
         if (my == 1)                         app.focus = FOCUS_FILTER;
+        else if (my >= app.tree_y && app.hex && mx >= app.tree_w) app.focus = FOCUS_HEX;
         else if (my >= app.tree_y)           app.focus = FOCUS_TREE;
         else if (my >= app.table_y) {
           long row = app.table->top + (my - (app.table_y + 3));
@@ -1193,7 +1465,8 @@ int main(int argc, char **argv)
     if (key == CTRL('o'))    { act_open(NULL); redraw(); continue; }
     if (key == CTRL('f'))    { act_find(NULL); redraw(); continue; }
     if (key == '\t') {
-      app.focus = (app.focus + 1) % 3;
+      app.focus = (app.focus + 1) % FOCUS_COUNT;
+      if (app.focus == FOCUS_HEX && !app.hex) app.focus = FOCUS_FILTER;
       redraw();
       continue;
     }
@@ -1219,8 +1492,9 @@ int main(int argc, char **argv)
     }
     if (key == 'q' || key == 'Q') { break; }
 
-    if (app.focus == FOCUS_TABLE) gtcaca_table_key(app.table, key, NULL);
-    else                          gtcaca_tree_key(app.tree, key, NULL);
+    if      (app.focus == FOCUS_TABLE) gtcaca_table_key(app.table, key, NULL);
+    else if (app.focus == FOCUS_HEX && app.hex) gtcaca_hexview_key(app.hex, key, NULL);
+    else                               gtcaca_tree_key(app.tree, key, NULL);
     redraw();
   }
 

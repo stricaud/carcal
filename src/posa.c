@@ -288,7 +288,7 @@ static uint64_t rd_le(const uint8_t *d, int n)
 /* track integer field values by name for bytes[lenfield] */
 typedef struct { char name[POSA_NAME_MAX]; uint64_t val; } seen_t;
 
-static int dissect_one(const posa_proto_t *p, const uint8_t *data, int len, cfield_t *node)
+static int dissect_one(const posa_proto_t *p, const uint8_t *data, int len, cfield_t *node, int abs_off)
 {
   int off = 0, i;
   seen_t seen[POSA_MAX_FLDS];
@@ -338,7 +338,7 @@ static int dissect_one(const posa_proto_t *p, const uint8_t *data, int len, cfie
         break;
       default: break;
       }
-      if (cf) { cf->off = off; cf->len = sz; }
+      if (cf) { cf->off = abs_off + off; cf->len = sz; }
       off += sz;
     } else if (f->type == PT_CSTRING) {
       int start = off, n = 0;
@@ -348,7 +348,7 @@ static int dissect_one(const posa_proto_t *p, const uint8_t *data, int len, cfie
       if (off < len && data[off] == '\0') off++;  /* consume NUL */
       cf = cfield_add(node, ab, CV_STR); cfield_set_str(cf, tmp);
       cfield_set_label(cf, "%s: %s", f->name, tmp);
-      cf->off = start; cf->len = off - start;
+      cf->off = abs_off + start; cf->len = off - start;
     } else if (f->type == PT_BYTES_REF) {
       int n = 0, j;
       for (j = 0; j < nseen; j++) if (!strcmp(seen[j].name, f->lenfield)) { n = (int)seen[j].val; break; }
@@ -356,14 +356,14 @@ static int dissect_one(const posa_proto_t *p, const uint8_t *data, int len, cfie
       if (n < 0) n = 0;
       cf = cfield_add(node, ab, CV_BYTES); cfield_set_bytes(cf, data + off, n);
       cfield_set_label(cf, "%s: %d bytes", f->name, n);
-      cf->off = off; cf->len = n;
+      cf->off = abs_off + off; cf->len = n;
       off += n;
     } else if (f->type == PT_PAYLOAD) {
       int n = len - off;
       if (n < 0) n = 0;
       cf = cfield_add(node, ab, CV_BYTES); cfield_set_bytes(cf, data + off, n);
       cfield_set_label(cf, "%s: %d bytes", f->name, n);
-      cf->off = off; cf->len = n;
+      cf->off = abs_off + off; cf->len = n;
       off = len;
     }
   }
@@ -399,7 +399,7 @@ const posa_proto_t *posa_resolve(const char *name, const uint8_t *data, int len)
   return resolve_group(name, data, len);
 }
 
-int posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent)
+int posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent, int abs_off)
 {
   const posa_proto_t *p = posa_find(proto_name);
   cfield_t *node;
@@ -414,6 +414,8 @@ int posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t 
 
   node = cfield_add(parent, p->name, CV_NONE);
   cfield_set_label(node, "%s", p->name);
-  used = dissect_one(p, data, len, node);
+  used = dissect_one(p, data, len, node, abs_off);
+  node->off = abs_off;
+  node->len = used > 0 ? used : len;
   return used > 0 ? used : len;  /* claim the payload even if zero-length fields */
 }

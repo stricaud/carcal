@@ -73,6 +73,8 @@ typedef struct {
   uint32_t  origlen;       /* original on-wire length                         */
   uint64_t  ts_us;         /* timestamp, microseconds since the Unix epoch    */
   uint16_t  linktype;      /* pcap/pcapng LINKTYPE_*                           */
+  uint8_t   is_custom;     /* 1 = pcapng Custom Block (not a captured packet) */
+  uint32_t  pen;           /* Custom Block private enterprise number          */
 
   /* Cached summary columns (filled lazily on first display). */
   int       summarized;
@@ -95,6 +97,9 @@ typedef struct {
    classic pcap. On failure returns -1 and writes a message to errbuf. */
 int  capture_load(const char *path, capture_t *cap, char *errbuf, size_t errlen);
 void capture_free(capture_t *cap);
+/* Optional progress callback invoked during capture_load (frac 0..1). Set to
+   NULL to disable. Used by the TUI to drive a load-progress gauge. */
+void capture_set_progress(void (*cb)(void *ud, double frac), void *ud);
 
 /* ── dissect.c — bytes → cfield tree ────────────────────────────────────── */
 /* Build the dissection tree for one packet. Caller frees with cfield_free.
@@ -168,7 +173,7 @@ const char *posa_bound_udp(uint16_t port); /* NULL if none */
 const char *posa_bound_tcp(uint16_t port);
 /* Dissect `data` as the named posa protocol, attaching a subtree to `parent`.
    Returns bytes consumed, 0 if it could not (unknown proto / no data). */
-int  posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent);
+int  posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent, int abs_off);
 /* Resolve a name to a concrete protocol, or — if it names an Object<parent>
    group — the sub-protocol whose first field matches `data`. NULL if neither. */
 const posa_proto_t *posa_resolve(const char *name, const uint8_t *data, int len);

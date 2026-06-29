@@ -38,6 +38,13 @@ static int cap_push(capture_t *cap, const uint8_t *data, uint32_t caplen,
   return 0;
 }
 
+/* ── optional load-progress callback ────────────────────────────────────── */
+static void (*g_progress)(void *ud, double frac);
+static void  *g_progress_ud;
+void capture_set_progress(void (*cb)(void *ud, double frac), void *ud)
+{ g_progress = cb; g_progress_ud = ud; }
+static void progress(double frac) { if (g_progress) g_progress(g_progress_ud, frac); }
+
 /* ── little helpers honoring a byte-swap flag ───────────────────────────── */
 static uint16_t rd16(const uint8_t *p, int swap)
 {
@@ -62,6 +69,8 @@ typedef struct {
   uint16_t   if_linktype[MAX_IFACES];
   uint32_t   if_tsresol_div[MAX_IFACES];  /* ticks per second (default 1e6)    */
   int        n_ifaces;
+  double     filesize;             /* for progress reporting (0 = unknown)     */
+  double     consumed;
 } pcapng_ctx_t;
 
 /* data points just past the 8-byte block header (block_type + total_length). */
@@ -120,9 +129,27 @@ static int pcapng_block_cb(uint32_t counter, uint32_t block_type,
     }
     break;
   }
+  case 0x00000BAD:    /* Custom Data Block (copyable) */
+  case 0x40000BAD: {  /* Custom Data Block (non-copyable) */
+    /* body: PEN(4) + custom data (+ options). Show the PEN and the data. */
+    if (body_len >= 4) {
+      uint32_t pen     = rd32(data, ctx->swap);
+      /* body = PEN(4) + custom data (+ options) + trailing block length(4);
+         drop the PEN and the trailing length to show the custom data. */
+      uint32_t datalen = body_len >= 8 ? body_len - 8 : 0;
+      if (cap_push(ctx->cap, data + 4, datalen, datalen, 0, 0) == 0) {
+        cpkt_t *p = &ctx->cap->pkts[ctx->cap->count - 1];
+        p->is_custom = 1;
+        p->pen = pen;
+      }
+    }
+    break;
+  }
   default:
     break;  /* NRB, ISB, DSB, custom, … not relevant to the packet list */
   }
+  ctx->consumed += block_total_length;
+  if (ctx->filesize > 0) progress(ctx->consumed / ctx->filesize);
   return 0;
 }
 
@@ -133,7 +160,10 @@ static int load_classic_pcap(FILE *fp, capture_t *cap, char *errbuf, size_t errl
   int swap = 0, nano = 0;
   uint32_t magic, linktype;
   uint8_t rh[16];
+  double fsz;
 
+  fseek(fp, 0, SEEK_END);
+  fsz = (double)ftell(fp);
   rewind(fp);
   if (fread(gh, 1, 24, fp) != 24) {
     snprintf(errbuf, errlen, "short pcap global header");
@@ -168,6 +198,7 @@ static int load_classic_pcap(FILE *fp, capture_t *cap, char *errbuf, size_t errl
     ts_us = (uint64_t)ts_sec * 1000000ULL + (nano ? ts_frac / 1000 : ts_frac);
     cap_push(cap, buf, incl, orig, ts_us, (uint16_t)linktype);
     free(buf);
+    if (fsz > 0) progress((double)ftell(fp) / fsz);
   }
   return 0;
 }
@@ -192,9 +223,10 @@ int capture_load(const char *path, capture_t *cap, char *errbuf, size_t errlen)
   if (magic[0] == 0x0A && magic[1] == 0x0D && magic[2] == 0x0D && magic[3] == 0x0A) {
     /* pcapng — hand off to libpcapng */
     pcapng_ctx_t ctx;
-    fclose(fp);
     memset(&ctx, 0, sizeof ctx);
     ctx.cap = cap;
+    fseek(fp, 0, SEEK_END); ctx.filesize = (double)ftell(fp);
+    fclose(fp);
     if (libpcapng_file_read((char *)path, pcapng_block_cb, &ctx) < 0) {
       snprintf(errbuf, errlen, "libpcapng failed to read %s", path);
       return -1;

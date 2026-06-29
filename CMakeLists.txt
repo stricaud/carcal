@@ -117,7 +117,9 @@ target_link_libraries(caracal PRIVATE
 # Ship the sample protocol definitions next to the binary so caracal can load
 # them at startup (CARACAL_PROTOS_DIR) without an install step.
 target_compile_definitions(caracal PRIVATE
-  CARACAL_PROTOS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protos")
+  CARACAL_PROTOS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protos"
+  CARACAL_GRAMMARS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/grammars")
 
 install(TARGETS caracal RUNTIME DESTINATION bin)
 install(DIRECTORY protos/ DESTINATION share/caracal/protos FILES_MATCHING PATTERN "*.posa")
+install(DIRECTORY grammars/ DESTINATION share/caracal/grammars FILES_MATCHING PATTERN "*.json")

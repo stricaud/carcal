@@ -22,8 +22,14 @@ static uint16_t be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); 
 static uint32_t be32(const uint8_t *p)
 { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
-/* summary sink (NULL when we only need the tree) */
-typedef struct { cpkt_t *sum; } dctx_t;
+/* summary sink (NULL when we only need the tree) + packet base for byte ranges */
+typedef struct { cpkt_t *sum; const uint8_t *base; } dctx_t;
+
+/* record a node's absolute byte range within the packet (for the hex pane) */
+static void set_range(dctx_t *c, cfield_t *n, const uint8_t *p, int len)
+{
+  if (n && c->base) { n->off = (int)(p - c->base); n->len = len; }
+}
 
 static void set_proto(dctx_t *c, const char *name)
 { if (c->sum) snprintf(c->sum->col_proto, sizeof c->sum->col_proto, "%s", name); }
@@ -60,6 +66,8 @@ static void dissect_tls (dctx_t *c, const uint8_t *d, int len, cfield_t *root);
 static void dissect_ssh (dctx_t *c, const uint8_t *d, int len, cfield_t *root);
 static void dissect_http(dctx_t *c, const uint8_t *d, int len, cfield_t *root);
 static void dissect_rdp (dctx_t *c, const uint8_t *d, int len, cfield_t *root);
+static void dissect_quic(dctx_t *c, const uint8_t *d, int len, cfield_t *root);
+static void dissect_data(dctx_t *c, const uint8_t *d, int len, cfield_t *root);
 static void dissect_text(dctx_t *c, const uint8_t *d, int len, cfield_t *root,
                          const char *abbrev, const char *name);
 
@@ -70,6 +78,7 @@ static void dissect_frame(dctx_t *c, const cpkt_t *pkt, cfield_t *root)
   cfield_t *f;
   cfield_set_label(fr, "Frame: %u bytes on wire, %u captured",
                    pkt->origlen, pkt->caplen);
+  set_range(c, fr, pkt->data, (int)pkt->caplen);
   f = cfield_add(fr, "frame.len", CV_UINT);
   cfield_set_uint(f, pkt->origlen);
   cfield_set_label(f, "Frame Length: %u", pkt->origlen);
@@ -92,6 +101,7 @@ static void dissect_ethernet(dctx_t *c, const uint8_t *d, int len, cfield_t *roo
 
   eth = cfield_add(root, "eth", CV_NONE);
   cfield_set_label(eth, "Ethernet II, Src: %s, Dst: %s", srcs, dsts);
+  set_range(c, eth, d, 14);
 
   f = cfield_add(eth, "eth.dst", CV_MAC); cfield_set_mac(f, d);
   cfield_set_label(f, "Destination: %s", dsts);
@@ -163,6 +173,7 @@ static void dissect_ipv4(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   ip = cfield_add(root, "ip", CV_NONE);
   cfield_set_label(ip, "Internet Protocol Version 4, Src: %s, Dst: %s", ss, ds);
+  set_range(c, ip, d, ihl >= 20 ? ihl : 20);
 
   f = cfield_add(ip, "ip.version", CV_UINT); cfield_set_uint(f, d[0] >> 4);
   cfield_set_label(f, "Version: %u", d[0] >> 4);
@@ -222,6 +233,7 @@ static void dissect_ipv6(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   f = cfield_add(root, "ipv6", CV_NONE);
   ip = f;
+  set_range(c, ip, d, 40);
   { cfield_t *s = cfield_add(ip, "ipv6.src", CV_IPV6); cfield_set_ipv6(s, d + 8);
     snprintf(ss, sizeof ss, "%s", s->str);
     cfield_set_label(s, "Source Address: %s", ss); }
@@ -279,6 +291,7 @@ static void dissect_arp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   a = cfield_add(root, "arp", CV_NONE);
   cfield_set_label(a, "Address Resolution Protocol (%s)", op == 1 ? "request" : op == 2 ? "reply" : "?");
+  set_range(c, a, d, 28);
   f = cfield_add(a, "arp.opcode", CV_UINT); cfield_set_uint(f, op);
   cfield_set_label(f, "Opcode: %u", op);
   f = cfield_add(a, "arp.src.hw_mac", CV_MAC); cfield_set_mac(f, d + 8);
@@ -324,6 +337,7 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   t = cfield_add(root, "tcp", CV_NONE);
   cfield_set_label(t, "Transmission Control Protocol, Src Port: %u, Dst Port: %u", sp, dp);
+  set_range(c, t, d, (doff >= 20 && doff <= len) ? doff : 20);
   f = cfield_add(t, "tcp.srcport", CV_UINT); cfield_set_uint(f, sp);
   cfield_set_label(f, "Source Port: %u", sp);
   f = cfield_add(t, "tcp.dstport", CV_UINT); cfield_set_uint(f, dp);
@@ -354,7 +368,7 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
     if (pll <= 0) return;
     bound = posa_bound_tcp(sp);
     if (!bound) bound = posa_bound_tcp(dp);
-    if (bound && posa_dissect(bound, pl, pll, root) > 0) {
+    if (bound && posa_dissect(bound, pl, pll, root, (int)(pl - c->base)) > 0) {
       set_proto(c, bound);
       return;
     }
@@ -372,6 +386,7 @@ static void dissect_tcp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
     else if (TP(6379))               dissect_text(c, pl, pll, root, "redis", "Redis");
     else if (TP(3389))               dissect_rdp(c, pl, pll, root);
     else if (TP(53) && pll > 2)      dissect_dns(c, pl + 2, pll - 2, root, "dns"); /* TCP DNS: 2-byte len prefix */
+    else if (pll > 0)                dissect_data(c, pl, pll, root);  /* undissected payload */
 #undef TP
   }
 }
@@ -389,6 +404,7 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   u = cfield_add(root, "udp", CV_NONE);
   cfield_set_label(u, "User Datagram Protocol, Src Port: %u, Dst Port: %u", sp, dp);
+  set_range(c, u, d, 8);
   f = cfield_add(u, "udp.srcport", CV_UINT); cfield_set_uint(f, sp);
   cfield_set_label(f, "Source Port: %u", sp);
   f = cfield_add(u, "udp.dstport", CV_UINT); cfield_set_uint(f, dp);
@@ -408,7 +424,7 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
     if (pll <= 0) return;
     bound = posa_bound_udp(sp);
     if (!bound) bound = posa_bound_udp(dp);
-    if (bound && posa_dissect(bound, pl, pll, root) > 0) {
+    if (bound && posa_dissect(bound, pl, pll, root, (int)(pl - c->base)) > 0) {
       set_proto(c, bound);
       return;
     }
@@ -422,6 +438,8 @@ static void dissect_udp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
     else if (UP(161) || UP(162))     dissect_snmp(c, pl, pll, root);
     else if (UP(1812)||UP(1813)||UP(1645)||UP(1646)) dissect_radius(c, pl, pll, root);
     else if (UP(514))                dissect_text(c, pl, pll, root, "syslog", "Syslog");
+    else if (UP(443) || UP(80))      dissect_quic(c, pl, pll, root);  /* QUIC over UDP */
+    else if (pll > 0)                dissect_data(c, pl, pll, root);  /* undissected payload */
 #undef UP
   }
 }
@@ -454,6 +472,7 @@ static void dissect_ntp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   ntp = cfield_add(root, "ntp", CV_NONE);
   cfield_set_label(ntp, "Network Time Protocol (NTPv%d, %s)", vn, ntp_mode_name(mode));
+  set_range(c, ntp, d, len);
 
   f = cfield_add(ntp, "ntp.flags", CV_UINT); cfield_set_uint(f, n->li_vn_mode);
   cfield_set_label(f, "Flags: 0x%02x (Leap=%d, Version=%d, Mode=%d %s)",
@@ -484,6 +503,7 @@ static void dissect_icmp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
   if (len < 4) { set_proto(c, "ICMP"); return; }
   ic = cfield_add(root, "icmp", CV_NONE);
   cfield_set_label(ic, "Internet Control Message Protocol");
+  set_range(c, ic, d, len < 8 ? len : 8);
   f = cfield_add(ic, "icmp.type", CV_UINT); cfield_set_uint(f, d[0]);
   cfield_set_label(f, "Type: %u", d[0]);
   f = cfield_add(ic, "icmp.code", CV_UINT); cfield_set_uint(f, d[1]);
@@ -528,6 +548,7 @@ static void dissect_dns(dctx_t *c, const uint8_t *d, int len, cfield_t *root, co
 
   dns = cfield_add(root, proto, CV_NONE);
   cfield_set_label(dns, "Domain Name System (%s)", (flags & 0x8000) ? "response" : "query");
+  set_range(c, dns, d, len);
   f = cfield_add(dns, "dns.id", CV_UINT); cfield_set_uint(f, id);
   cfield_set_label(f, "Transaction ID: 0x%04x", id);
   f = cfield_add(dns, "dns.flags", CV_UINT); cfield_set_uint(f, flags);
@@ -558,6 +579,27 @@ static void printable_line(const uint8_t *d, int len, char *out, int outsz)
   out[o] = '\0';
 }
 
+/* ── undissected payload (Wireshark's "Data") ───────────────────────────── */
+static void dissect_data(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
+{
+  cfield_t *dn, *f;
+  char hex[51];
+  int i, n, o = 0;
+  if (len <= 0) return;
+  dn = cfield_add(root, "data", CV_NONE);
+  set_range(c, dn, d, len);
+  cfield_set_label(dn, "Data (%d byte%s)", len, len == 1 ? "" : "s");
+
+  f = cfield_add(dn, "data.len", CV_UINT); cfield_set_uint(f, len);
+  cfield_set_label(f, "Length: %d", len);
+
+  n = len < 16 ? len : 16;
+  for (i = 0; i < n; i++) o += snprintf(hex + o, sizeof hex - o, "%02x", d[i]);
+  f = cfield_add(dn, "data.data", CV_BYTES); cfield_set_bytes(f, d, len);
+  set_range(c, f, d, len);
+  cfield_set_label(f, "Data: %s%s", hex, len > 16 ? "\xe2\x80\xa6" : "");
+}
+
 /* ── generic line-oriented text protocol (FTP/SMTP/POP/IMAP/Telnet/IRC/…) ── */
 static void dissect_text(dctx_t *c, const uint8_t *d, int len, cfield_t *root,
                          const char *abbrev, const char *name)
@@ -567,6 +609,7 @@ static void dissect_text(dctx_t *c, const uint8_t *d, int len, cfield_t *root,
   if (len <= 0) { set_proto(c, name); return; }
   n = cfield_add(root, abbrev, CV_NONE);
   cfield_set_label(n, "%s", name);
+  set_range(c, n, d, len);
   printable_line(d, len, line, sizeof line);
   snprintf(ab, sizeof ab, "%s.line", abbrev);
   f = cfield_add(n, ab, CV_STR);
@@ -585,6 +628,7 @@ static void dissect_http(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   h = cfield_add(root, "http", CV_NONE);
   cfield_set_label(h, "Hypertext Transfer Protocol");
+  set_range(c, h, d, len);
   set_proto(c, "HTTP");
 
   while (i < len) {
@@ -687,6 +731,7 @@ static void dissect_tls(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
 
   t = cfield_add(root, "tls", CV_NONE);
   cfield_set_label(t, "Transport Layer Security (%s, %s)", tls_ver_name(ver), tls_ct_name(ct));
+  set_range(c, t, d, len);
   f = cfield_add(t, "tls.record.content_type", CV_UINT); cfield_set_uint(f, ct);
   cfield_set_label(f, "Content Type: %s (%u)", tls_ct_name(ct), ct);
   f = cfield_add(t, "tls.record.version", CV_UINT); cfield_set_uint(f, ver);
@@ -799,6 +844,7 @@ static void dissect_dhcp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
   if (len < 236) { set_proto(c, "DHCP"); return; }
 
   dh = cfield_add(root, "dhcp", CV_NONE);
+  set_range(c, dh, d, len);
   f = cfield_add(dh, "dhcp.op", CV_UINT); cfield_set_uint(f, b->op);
   cfield_set_label(f, "Message op code: %s (%u)",
                    b->op == 1 ? "Boot Request" : b->op == 2 ? "Boot Reply" : "?", b->op);
@@ -946,11 +992,72 @@ static void dissect_rdp(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
   }
 }
 
+/* ── QUIC (IETF; headers only — payload is encrypted) ───────────────────── */
+static const char *quic_lpt(uint8_t t)
+{
+  switch (t) {
+  case 0: return "Initial"; case 1: return "0-RTT";
+  case 2: return "Handshake"; case 3: return "Retry";
+  default: return "?";
+  }
+}
+static void dissect_quic(dctx_t *c, const uint8_t *d, int len, cfield_t *root)
+{
+  cfield_t *q, *f;
+  uint8_t b0;
+  if (len < 1) { set_proto(c, "QUIC"); return; }
+  b0 = d[0];
+  /* Heuristic guard: a long header has the high two bits set (0xC0); a short
+     header has 0x40 set and 0x80 clear. Anything else isn't QUIC v1-ish. */
+  if (!(b0 & 0x40)) { set_proto(c, "QUIC"); return; }
+
+  q = cfield_add(root, "quic", CV_NONE);
+  set_range(c, q, d, len);
+  set_proto(c, "QUIC");
+
+  if (b0 & 0x80) {                              /* long header */
+    uint32_t ver;
+    uint8_t pt = (b0 >> 4) & 0x03;
+    int off, dl, sl;
+    cfield_set_label(q, "QUIC IETF (long header)");
+    f = cfield_add(q, "quic.header_form", CV_UINT); cfield_set_uint(f, 1);
+    cfield_set_label(f, "Header Form: Long Header (1)");
+    if (len < 6) { set_info(c, "QUIC long header"); return; }
+    ver = be32(d + 1);
+    f = cfield_add(q, "quic.version", CV_UINT); cfield_set_uint(f, ver);
+    cfield_set_label(f, "Version: 0x%08x", ver);
+    f = cfield_add(q, "quic.long.packet_type", CV_UINT); cfield_set_uint(f, pt);
+    cfield_set_label(f, "Packet Type: %s (%u)", ver == 0 ? "Version Negotiation" : quic_lpt(pt), pt);
+    off = 5;
+    dl = d[off++];
+    if (off + dl <= len) {
+      f = cfield_add(q, "quic.dcid", CV_BYTES); cfield_set_bytes(f, d + off, dl);
+      cfield_set_label(f, "Destination Connection ID: %d bytes", dl);
+      off += dl;
+    }
+    if (off < len) {
+      sl = d[off++];
+      if (off + sl <= len) {
+        f = cfield_add(q, "quic.scid", CV_BYTES); cfield_set_bytes(f, d + off, sl);
+        cfield_set_label(f, "Source Connection ID: %d bytes", sl);
+      }
+    }
+    set_info(c, "QUIC %s", ver == 0 ? "Version Negotiation" : quic_lpt(pt));
+  } else {                                      /* short header (1-RTT) */
+    cfield_set_label(q, "QUIC IETF (short header, protected)");
+    f = cfield_add(q, "quic.header_form", CV_UINT); cfield_set_uint(f, 0);
+    cfield_set_label(f, "Header Form: Short Header (0)");
+    set_info(c, "QUIC protected payload");
+  }
+}
+
 /* ── linktype entry ─────────────────────────────────────────────────────── */
 static cfield_t *do_dissect(const cpkt_t *pkt, cpkt_t *sum)
 {
-  dctx_t c = { sum };
+  dctx_t c;
   cfield_t *root = cfield_new("", CV_NONE);
+  c.sum = sum;
+  c.base = pkt->data;
   const uint8_t *d = pkt->data;
   int len = (int)pkt->caplen;
   if (!root) return NULL;
@@ -958,6 +1065,20 @@ static cfield_t *do_dissect(const cpkt_t *pkt, cpkt_t *sum)
   dissect_frame(&c, pkt, root);
   set_proto(&c, "?");
   set_info(&c, "");
+
+  /* pcapng Custom Block: not a captured frame — show the PEN and its bytes. */
+  if (pkt->is_custom) {
+    cfield_t *cb = cfield_add(root, "pcapng.cb", CV_NONE), *f;
+    cfield_set_label(cb, "pcapng Custom Block (PEN 0x%08x, %u bytes)", pkt->pen, pkt->caplen);
+    f = cfield_add(cb, "pcapng.cb.pen", CV_UINT); cfield_set_uint(f, pkt->pen);
+    cfield_set_label(f, "Private Enterprise Number: 0x%08x", pkt->pen);
+    dissect_data(&c, d, len, cb);
+    set_proto(&c, "PcapngCB");
+    set_src(&c, "—");
+    set_dst(&c, "—");
+    set_info(&c, "Custom Block, PEN 0x%08x, %u bytes", pkt->pen, pkt->caplen);
+    return root;
+  }
 
   switch (pkt->linktype) {
   case LINKTYPE_ETHERNET:
