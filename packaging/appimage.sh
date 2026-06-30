@@ -10,6 +10,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="$(uname -m)"
 BIN="$ROOT/build/caracal"
+
+# CI runners (and many minimal hosts) lack FUSE; make AppImage tools self-extract
+# instead of mounting, so linuxdeploy and appimagetool run without FUSE.
+export APPIMAGE_EXTRACT_AND_RUN=1
 APPDIR="$ROOT/dist/AppDir"
 TOOL="$ROOT/dist/linuxdeploy-$ARCH.AppImage"
 

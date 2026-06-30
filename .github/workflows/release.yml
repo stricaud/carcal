@@ -14,13 +14,14 @@ jobs:
   package:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write          # needed to attach assets to the release
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, label: linux-x86_64 }
           - { os: macos-14,      label: macos-arm64  }
-          - { os: macos-13,      label: macos-x86_64 }
     steps:
       - name: Checkout caracal
         uses: actions/checkout@v4
