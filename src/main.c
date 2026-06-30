@@ -55,6 +55,13 @@
 
 #define CTRL(c) ((c) & 0x1f)
 
+/* Data directories: env override (set by a relocatable bundle's launcher) wins
+   over the compile-time default. */
+static const char *protos_dir(void)
+{ const char *e = getenv("CARACAL_PROTOS_DIR"); return (e && *e) ? e : CARACAL_PROTOS_DIR; }
+static const char *grammars_dir(void)
+{ const char *e = getenv("CARACAL_GRAMMARS_DIR"); return (e && *e) ? e : CARACAL_GRAMMARS_DIR; }
+
 enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE, FOCUS_HEX, FOCUS_COUNT };
 
 typedef struct {
@@ -1041,7 +1048,11 @@ static void act_posa_new(void *u)
   ed  = gtcaca_editor_new(GTCACA_WIDGET(win), 1, 1, edw, h - 2);
   gtcaca_editor_set_text(ed, POSA_TEMPLATE);
   /* TextMate-grammar syntax colouring (needs gtcaca built with Oniguruma). */
-  grammar = gtcaca_editor_grammar_load(CARACAL_GRAMMARS_DIR "/posa.tmLanguage.json");
+  {
+    char gpath[1024];
+    snprintf(gpath, sizeof gpath, "%s/posa.tmLanguage.json", grammars_dir());
+    grammar = gtcaca_editor_grammar_load(gpath);
+  }
   if (grammar) gtcaca_editor_set_grammar(ed, grammar);
   help = (edw < w - 4)
        ? gtcaca_textview_new(GTCACA_WIDGET(win), edw + 2, 1, w - edw - 3, h - 2) : NULL;
@@ -1308,7 +1319,7 @@ static int dump_mode(const char *path, const char *expr)
   long i, shown = 0;
   int printed_detail = 0;
 
-  posa_load_dir(CARACAL_PROTOS_DIR);
+  posa_load_dir(protos_dir());
   /* Optional port binding for scripted testing, e.g. CARACAL_BIND="udp 69 TFTP" */
   {
     const char *b = getenv("CARACAL_BIND");
@@ -1388,7 +1399,7 @@ static int lua_cli(int argc, char **argv)
   if (!script) { fprintf(stderr, "caracal: -s <script.lua> is required\n"); return 2; }
   if (!capf)   { fprintf(stderr, "caracal: -r <capture> is required\n"); return 2; }
 
-  posa_load_dir(CARACAL_PROTOS_DIR);
+  posa_load_dir(protos_dir());
   for (i = 0; i < nposas; i++) {
     if (posa_load_file(posas[i], err, sizeof err) < 0)
       fprintf(stderr, "caracal: -p %s: %s\n", posas[i], err);
@@ -1445,7 +1456,7 @@ int main(int argc, char **argv)
   }
 
   /* Load bundled protocol definitions (best effort). */
-  posa_load_dir(CARACAL_PROTOS_DIR);
+  posa_load_dir(protos_dir());
 
   W = caca_get_canvas_width(gmo.cv);
   H = caca_get_canvas_height(gmo.cv);

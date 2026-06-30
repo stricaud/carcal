@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=caracal
+GenericName=Packet Analyzer
+Comment=A terminal packet analyzer (TUI Wireshark) built on gtcaca + libpcapng
+Exec=caracal %f
+Icon=caracal
+Terminal=true
+Categories=Network;Monitor;System;
+MimeType=application/vnd.tcpdump.pcap;
+Keywords=pcap;pcapng;network;packets;wireshark;tui;

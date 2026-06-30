@@ -183,6 +183,42 @@ from a reassembled stream — the MQS use-case, on any capture file):
 caracal -s scripts/mysql-queries.lua -r dump.pcapng -f "tcp.port == 3306"
 ```
 
+## Packaging (Linux & macOS)
+
+`packaging/build.sh` builds caracal + the sibling libraries (gtcaca, libpcapng)
+in Release and produces a **self-contained** tarball under `dist/` — every
+non-system library (gtcaca, libpcapng, libcaca, luajit, oniguruma) is bundled
+and the binary's load paths are rewritten (`@executable_path/../lib` on macOS,
+`$ORIGIN/../lib` on Linux), so it runs with no Homebrew / `LD_LIBRARY_PATH`.
+
+```sh
+# libraries checked out next to this repo (../gtcaca, ../libpcapng):
+packaging/build.sh
+# → dist/caracal-macos-arm64.tar.gz   (or caracal-linux-x86_64.tar.gz, …)
+```
+
+The tarball contains `caracal` (a launcher that points at its bundled
+`protos/` and `grammars/`), `bin/caracal`, and `lib/`. caracal honors
+`CARACAL_PROTOS_DIR` / `CARACAL_GRAMMARS_DIR` so the bundle finds its data
+wherever it's unpacked.
+
+`build.sh` also emits a native installer alongside the tarball:
+
+- **macOS** — `dist/caracal-macos-<arch>.pkg` (installs to `/usr/local/caracal`,
+  symlinks `/usr/local/bin/caracal`). Unsigned, so first run is right-click ▸
+  Open or `installer -pkg … -target /`; sign/notarize separately for wide
+  distribution.
+- **Linux** — `dist/caracal-linux-<arch>.AppImage`, a single self-contained
+  executable (built with `linuxdeploy`; an `AppRun` hook points caracal at its
+  bundled data). Falls back to just the tarball if `linuxdeploy` can't be
+  fetched.
+
+CI ([.github/workflows/release.yml](.github/workflows/release.yml)) builds the
+same artifacts on a matrix (Linux x86_64, macOS arm64 + x86_64) and attaches
+them to a release when a `v*` tag is pushed. Cross-compiling is intentionally
+avoided — each platform builds natively (libcaca's terminal backends make
+cross-builds of the C dependencies more trouble than a CI matrix).
+
 ## Scope / limitations
 
 - **Reading only** — live capture is not implemented (libpcapng has no live
