@@ -40,6 +40,7 @@
 #include <gtcaca/linechart.h>
 #include <gtcaca/hexview.h>
 #include <gtcaca/tree.h>
+#include <gtcaca/mindmap.h>
 #include <gtcaca/gauge.h>
 
 #include <libpcapng/reassembly_tcp.h>   /* pcapng_tcp_reasm_* for Follow TCP Stream */
@@ -1475,6 +1476,337 @@ static void act_proto_stats(void *u)
   modal_close_menu();
 }
 
+/* ══ NetFlow / Conversations ════════════════════════════════════════════════
+ * Aggregates packets into conversations (flows) keyed by protocol + endpoint
+ * pair, then presents them two ways: a Host → Conversation tree with a packet
+ * table for the selected flow, and a mind-map for browsing. Enter on a packet
+ * jumps to it in the main list. */
+typedef struct {
+  char     proto[8];
+  char     ipa[48]; int porta;
+  char     ipb[48]; int portb;
+  long    *pk; long npk, cpk;    /* packet indices in this flow             */
+  long     bytes;
+  uint64_t first_us, last_us;
+} nf_flow_t;
+
+typedef struct {
+  char  ip[48];
+  long  npkts;
+  int  *fl; int nfl, cfl;        /* flow indices this host participates in   */
+  int   first_conv, nconv;       /* slice into convnodes                     */
+} nf_host_t;
+
+typedef struct { int kind; int host; int flow; } nf_node_t;   /* 0=host 1=conv */
+
+typedef struct {
+  nf_flow_t *flows; int nflows, cflows;
+  nf_host_t *hosts; int nhosts, chosts;
+  nf_node_t *hostnodes;
+  nf_node_t *convnodes; int nconv;
+  int selflow;                   /* flow whose packets the table shows       */
+} nf_ctx_t;
+
+static nf_ctx_t *g_nf;
+
+static void nf_ep(const char *ip, int port, char *out, size_t n)
+{
+  if (port <= 0)            snprintf(out, n, "%s", ip);
+  else if (strchr(ip, ':')) snprintf(out, n, "[%s]:%d", ip, port);   /* IPv6 */
+  else                      snprintf(out, n, "%s:%d", ip, port);
+}
+
+static nf_flow_t *nf_find_flow(nf_ctx_t *c, const char *proto,
+                               const char *ipa, int pa, const char *ipb, int pb)
+{
+  int i;
+  for (i = 0; i < c->nflows; i++) {
+    nf_flow_t *f = &c->flows[i];
+    if (f->porta == pa && f->portb == pb && !strcmp(f->proto, proto) &&
+        !strcmp(f->ipa, ipa) && !strcmp(f->ipb, ipb)) return f;
+  }
+  if (c->nflows == c->cflows) {
+    int nc = c->cflows ? c->cflows * 2 : 32;
+    c->flows = realloc(c->flows, (size_t)nc * sizeof *c->flows); c->cflows = nc;
+  }
+  { nf_flow_t *f = &c->flows[c->nflows++];
+    memset(f, 0, sizeof *f);
+    snprintf(f->proto, sizeof f->proto, "%s", proto);
+    snprintf(f->ipa, sizeof f->ipa, "%s", ipa); f->porta = pa;
+    snprintf(f->ipb, sizeof f->ipb, "%s", ipb); f->portb = pb;
+    return f; }
+}
+
+static nf_host_t *nf_find_host(nf_ctx_t *c, const char *ip)
+{
+  int i;
+  for (i = 0; i < c->nhosts; i++) if (!strcmp(c->hosts[i].ip, ip)) return &c->hosts[i];
+  if (c->nhosts == c->chosts) {
+    int nc = c->chosts ? c->chosts * 2 : 32;
+    c->hosts = realloc(c->hosts, (size_t)nc * sizeof *c->hosts); c->chosts = nc;
+  }
+  { nf_host_t *h = &c->hosts[c->nhosts++];
+    memset(h, 0, sizeof *h);
+    snprintf(h->ip, sizeof h->ip, "%s", ip);
+    return h; }
+}
+
+static void nf_host_add_flow(nf_host_t *h, int flowidx)
+{
+  int j;
+  for (j = 0; j < h->nfl; j++) if (h->fl[j] == flowidx) return;
+  if (h->nfl == h->cfl) { int nc = h->cfl ? h->cfl * 2 : 8;
+    h->fl = realloc(h->fl, (size_t)nc * sizeof *h->fl); h->cfl = nc; }
+  h->fl[h->nfl++] = flowidx;
+}
+
+static nf_ctx_t *nf_build(void)
+{
+  nf_ctx_t *c = calloc(1, sizeof *c);
+  long k; int i, idx;
+  c->selflow = -1;
+  for (k = 0; k < app.nview; k++) {
+    long pidx = view_pkt_index(k);
+    cpkt_t *p = &app.cap.pkts[pidx];
+    caracal_l4_t l4;
+    int has, pa, pb, swap, hostflow;
+    const char *proto; char ipa[48], ipb[48];
+    nf_flow_t *f;
+    if (pidx < 0) continue;
+    dissect_summarize(p);
+    if (!p->col_src[0] || !p->col_dst[0]) continue;
+    has = caracal_locate_l4(p, &l4) && (l4.proto == 6 || l4.proto == 17);
+    proto = has ? (l4.proto == 6 ? "TCP" : "UDP") : (p->col_proto[0] ? p->col_proto : "?");
+    snprintf(ipa, sizeof ipa, "%s", p->col_src); pa = has ? l4.sport : 0;
+    snprintf(ipb, sizeof ipb, "%s", p->col_dst); pb = has ? l4.dport : 0;
+    swap = strcmp(ipa, ipb); if (swap == 0) swap = pa - pb;
+    if (swap > 0) { char t[48]; int tp; memcpy(t, ipa, 48); memcpy(ipa, ipb, 48); memcpy(ipb, t, 48);
+                    tp = pa; pa = pb; pb = tp; }
+    f = nf_find_flow(c, proto, ipa, pa, ipb, pb);
+    if (f->npk == f->cpk) { long nc = f->cpk ? f->cpk * 2 : 16;
+      f->pk = realloc(f->pk, (size_t)nc * sizeof *f->pk); f->cpk = nc; }
+    f->pk[f->npk++] = pidx;
+    f->bytes += p->origlen;
+    if (f->npk == 1) f->first_us = f->last_us = p->ts_us;
+    else { if (p->ts_us < f->first_us) f->first_us = p->ts_us;
+           if (p->ts_us > f->last_us)  f->last_us  = p->ts_us; }
+    hostflow = (int)(f - c->flows);
+    { nf_host_t *ha = nf_find_host(c, ipa); ha->npkts++; nf_host_add_flow(ha, hostflow); }
+    { nf_host_t *hb = nf_find_host(c, ipb); hb->npkts++; nf_host_add_flow(hb, hostflow); }
+  }
+  /* node arrays for the tree */
+  c->hostnodes = malloc((size_t)(c->nhosts ? c->nhosts : 1) * sizeof *c->hostnodes);
+  for (i = 0; i < c->nhosts; i++) { c->hostnodes[i].kind = 0; c->hostnodes[i].host = i; c->hostnodes[i].flow = -1; }
+  for (i = 0, c->nconv = 0; i < c->nhosts; i++) c->nconv += c->hosts[i].nfl;
+  c->convnodes = malloc((size_t)(c->nconv ? c->nconv : 1) * sizeof *c->convnodes);
+  for (i = 0, idx = 0; i < c->nhosts; i++) {
+    int j; c->hosts[i].first_conv = idx; c->hosts[i].nconv = c->hosts[i].nfl;
+    for (j = 0; j < c->hosts[i].nfl; j++) {
+      c->convnodes[idx].kind = 1; c->convnodes[idx].host = i; c->convnodes[idx].flow = c->hosts[i].fl[j]; idx++;
+    }
+  }
+  return c;
+}
+
+static void nf_free(nf_ctx_t *c)
+{
+  int i;
+  if (!c) return;
+  for (i = 0; i < c->nflows; i++) free(c->flows[i].pk);
+  for (i = 0; i < c->nhosts; i++) free(c->hosts[i].fl);
+  free(c->flows); free(c->hosts); free(c->hostnodes); free(c->convnodes); free(c);
+}
+
+/* other endpoint of a conversation relative to a host, formatted */
+static void nf_conv_other(const nf_flow_t *f, const char *host_ip, char *out, size_t n)
+{
+  if (!strcmp(host_ip, f->ipa)) nf_ep(f->ipb, f->portb, out, n);
+  else                          nf_ep(f->ipa, f->porta, out, n);
+}
+
+/* ── NetFlow tree model (host → conversation) ───────────────────────────── */
+static long nf_tcc(gtcaca_tree_model_t *m, void *node)
+{ nf_node_t *n = node; (void)m;
+  if (!n) return g_nf->nhosts;
+  return (n->kind == 0) ? g_nf->hosts[n->host].nconv : 0; }
+static void *nf_tchild(gtcaca_tree_model_t *m, void *node, long i)
+{ nf_node_t *n = node; (void)m;
+  if (!n) return &g_nf->hostnodes[i];
+  return &g_nf->convnodes[g_nf->hosts[n->host].first_conv + i]; }
+static int nf_thas(gtcaca_tree_model_t *m, void *node)
+{ nf_node_t *n = node; (void)m; return n && n->kind == 0 && g_nf->hosts[n->host].nconv > 0; }
+static void nf_tlabel(gtcaca_tree_model_t *m, void *node, char *b, int l)
+{
+  nf_node_t *n = node; (void)m;
+  if (!n) { b[0] = '\0'; return; }
+  if (n->kind == 0) {
+    nf_host_t *h = &g_nf->hosts[n->host];
+    snprintf(b, l, "%s   (%ld pkts, %d flows)", h->ip, h->npkts, h->nfl);
+  } else {
+    nf_flow_t *f = &g_nf->flows[n->flow];
+    char other[64];
+    nf_conv_other(f, g_nf->hosts[n->host].ip, other, sizeof other);
+    snprintf(b, l, "%-4s \xe2\x86\x94 %-28s  %ld pkts  %ld B", f->proto, other, f->npk, f->bytes);
+  }
+}
+static gtcaca_tree_model_t nf_tree_model = { nf_tcc, nf_tchild, nf_tlabel, nf_thas, NULL, NULL };
+
+/* ── NetFlow packet sub-table (packets of the selected flow) ────────────── */
+static long nfp_rows(gtcaca_table_model_t *m)
+{ (void)m; return (g_nf && g_nf->selflow >= 0) ? g_nf->flows[g_nf->selflow].npk : 0; }
+static int  nfp_cols(gtcaca_table_model_t *m) { (void)m; return 7; }
+static void nfp_cell(gtcaca_table_model_t *m, long row, int col, char *b, int l)
+{
+  nf_flow_t *f; long pidx; cpkt_t *p;
+  (void)m;
+  if (!g_nf || g_nf->selflow < 0) { b[0] = '\0'; return; }
+  f = &g_nf->flows[g_nf->selflow];
+  if (row < 0 || row >= f->npk) { b[0] = '\0'; return; }
+  pidx = f->pk[row]; p = &app.cap.pkts[pidx];
+  dissect_summarize(p);
+  switch (col) {
+  case 0: snprintf(b, l, "%ld", pidx + 1); break;
+  case 1: { double t = (double)((p->ts_us >= app.cap.first_ts_us) ? p->ts_us - app.cap.first_ts_us : 0) / 1e6;
+            snprintf(b, l, "%.6f", t); break; }
+  case 2: snprintf(b, l, "%s", p->col_src); break;
+  case 3: snprintf(b, l, "%s", p->col_dst); break;
+  case 4: snprintf(b, l, "%s", p->col_proto); break;
+  case 5: snprintf(b, l, "%u", p->origlen); break;
+  case 6: snprintf(b, l, "%s", p->col_info); break;
+  default: b[0] = '\0';
+  }
+}
+static gtcaca_table_model_t nf_pkt_model = { nfp_rows, nfp_cols, tm_header, nfp_cell, NULL };
+
+/* Populate the mind-map: Capture → hosts → conversations. */
+static void nf_fill_mindmap(gtcaca_mindmap_widget_t *mm)
+{
+  gtcaca_mm_node_t *root;
+  int i, j;
+  gtcaca_mindmap_clear(mm, "Capture");
+  root = gtcaca_mindmap_root(mm);
+  for (i = 0; i < g_nf->nhosts; i++) {
+    nf_host_t *h = &g_nf->hosts[i];
+    char t[80];
+    gtcaca_mm_node_t *hn;
+    snprintf(t, sizeof t, "%s (%ld)", h->ip, h->npkts);
+    hn = gtcaca_mindmap_add_child(mm, root, t);
+    for (j = 0; j < h->nfl; j++) {
+      nf_flow_t *f = &g_nf->flows[h->fl[j]];
+      char other[64], ct[100];
+      gtcaca_mm_node_t *cn;
+      nf_conv_other(f, h->ip, other, sizeof other);
+      snprintf(ct, sizeof ct, "%s \xe2\x86\x94 %s (%ld)", f->proto, other, f->npk);
+      cn = gtcaca_mindmap_add_child(mm, hn, ct);
+      if (cn) cn->userdata = f;               /* map map-node → flow */
+    }
+    if (hn) hn->folded = 1;                    /* start collapsed for browsing */
+  }
+}
+
+enum { NFV_LIST = 0, NFV_MAP = 1 };
+
+static void act_netflow(void *u)
+{
+  gtcaca_window_widget_t *win;
+  gtcaca_tree_widget_t *tree;
+  gtcaca_table_widget_t *tbl;
+  gtcaca_mindmap_widget_t *mm;
+  gtcaca_label_widget_t *help;
+  int w, h, th, mode = NFV_LIST, focus_tbl = 0, prev_flow = -2;
+  long jump = -1, r;
+  caca_event_t ev;
+  (void)u;
+
+  if (app.nview == 0) { gtcaca_dialog_message("NetFlow", "No packets to summarise."); return; }
+  g_nf = nf_build();
+  if (g_nf->nflows == 0) { nf_free(g_nf); g_nf = NULL;
+    gtcaca_dialog_message("NetFlow", "No conversations found."); modal_close_menu(); return; }
+  g_nf->selflow = (g_nf->nconv > 0) ? g_nf->convnodes[0].flow : (g_nf->nflows ? 0 : -1);
+
+  win = modal_window("NetFlow \xe2\x80\x94 Conversations", &w, &h);
+  th  = (h - 3) * 45 / 100; if (th < 4) th = 4; if (th > h - 6) th = h - 6;
+  tree = gtcaca_tree_new(GTCACA_WIDGET(win), 1, 1, w - 2, th);
+  gtcaca_tree_set_model(tree, &nf_tree_model);
+  gtcaca_tree_set_title(tree, "Hosts \xe2\x96\xb8 Conversations");
+  tbl  = gtcaca_table_new(GTCACA_WIDGET(win), 1, 1 + th, w - 2, h - 3 - th);
+  gtcaca_table_set_model(tbl, &nf_pkt_model);
+  mm   = gtcaca_mindmap_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 3);
+  gtcaca_mindmap_set_title(mm, "Connections map");
+  nf_fill_mindmap(mm);
+  mm->is_visible = 0;
+  help = gtcaca_label_new(GTCACA_WIDGET(win), "", 2, h - 2);
+  help->width = w - 4;
+
+  for (;;) {
+    int k, sel_flow;
+    nf_node_t *tn;
+    /* keep the packet table bound to the tree's selected conversation */
+    tn = (nf_node_t *)gtcaca_tree_selected_node(tree);
+    if (mode == NFV_LIST && tn && tn->kind == 1) g_nf->selflow = tn->flow;
+    if (g_nf->selflow != prev_flow) { gtcaca_table_set_current(tbl, 0, 0); prev_flow = g_nf->selflow; }
+
+    tree->is_visible = tbl->is_visible = (mode == NFV_LIST);
+    mm->is_visible = (mode == NFV_MAP);
+    tree->has_focus = (mode == NFV_LIST && !focus_tbl);
+    tbl->has_focus  = (mode == NFV_LIST &&  focus_tbl);
+    mm->has_focus   = (mode == NFV_MAP);
+    help->label = (char *)(mode == NFV_MAP
+      ? "  \xe2\x86\x91\xe2\x86\x93 browse   \xe2\x86\x90/\xe2\x86\x92 fold   Enter view packets   m list   Esc close"
+      : focus_tbl
+        ? "  \xe2\x86\x91\xe2\x86\x93 packets   Enter jump to packet   Tab tree   m map   Esc close"
+        : "  \xe2\x86\x91\xe2\x86\x93/\xe2\x86\x92 tree   Tab packets   m map   Esc close");
+
+    gtcaca_redraw();
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    if (k == CACA_KEY_ESCAPE || k == 'q') break;
+    if (k == 'm') { mode = (mode == NFV_LIST) ? NFV_MAP : NFV_LIST; continue; }
+
+    if (mode == NFV_MAP) {
+      if (k == CACA_KEY_RETURN || k == 10) {
+        gtcaca_mm_node_t *n = gtcaca_mindmap_selected(mm);
+        if (n && n->userdata) {
+          g_nf->selflow = (int)((nf_flow_t *)n->userdata - g_nf->flows);
+          mode = NFV_LIST; focus_tbl = 1;
+        }
+      } else gtcaca_mindmap_key(mm, k, NULL);
+      continue;
+    }
+
+    /* list mode */
+    if (k == '\t') { focus_tbl = !focus_tbl; continue; }
+    if (focus_tbl) {
+      if (k == CACA_KEY_RETURN || k == 10) {
+        sel_flow = g_nf->selflow;
+        if (sel_flow >= 0) {
+          long row = gtcaca_table_selected_row(tbl);
+          if (row >= 0 && row < g_nf->flows[sel_flow].npk) { jump = g_nf->flows[sel_flow].pk[row]; break; }
+        }
+      } else gtcaca_table_key(tbl, k, NULL);
+    } else {
+      gtcaca_tree_key(tree, k, NULL);
+    }
+  }
+
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(help)); free(help);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(mm));   gtcaca_mindmap_free(mm);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tbl));  free(tbl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tree)); gtcaca_tree_free(tree);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));  free(win);
+  nf_free(g_nf); g_nf = NULL;
+  modal_close_menu();
+
+  /* jump to the chosen packet in the main list */
+  if (jump >= 0)
+    for (r = 0; r < app.nview; r++)
+      if (view_pkt_index(r) == jump) {
+        gtcaca_table_set_current(app.table, r, 0);
+        detail_rebuild(r);
+        break;
+      }
+}
+
 /* ── posa editor (with a help panel) ────────────────────────────────────── */
 static const char POSA_TEMPLATE[] =
   "# A custom protocol decoder (.posa).\n"
@@ -1928,6 +2260,7 @@ static void build_menu(void)
 
   e = gtcaca_menu_add_entry(app.menu, "Statistics");
   gtcaca_menu_add_item(app.menu, e, "Protocol Hierarchy",   "",    act_proto_stats, NULL);
+  gtcaca_menu_add_item(app.menu, e, "Conversations (NetFlow)", "", act_netflow,   NULL);
   gtcaca_menu_add_item(app.menu, e, "IO Graph",             "",    act_io_graph,  NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Help");
