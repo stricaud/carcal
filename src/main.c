@@ -107,6 +107,7 @@ typedef struct {
   int  capturing;
   int  cap_follow;           /* auto-scroll to the newest packet */
   char cap_iface[64];
+  char cap_filter[256];      /* last capture filter, for Restart */
 } app_t;
 
 static app_t app;
@@ -1286,6 +1287,7 @@ static int start_capture(const char *iface, const char *cfilter)
   app.capturing = 1;
   app.cap_follow = 1;
   snprintf(app.cap_iface, sizeof app.cap_iface, "%s", iface);
+  snprintf(app.cap_filter, sizeof app.cap_filter, "%s", cfilter ? cfilter : "");
   if (app.table) { gtcaca_table_set_title(app.table, app.cap.path); gtcaca_table_set_current(app.table, 0, 0); }
   return 1;
 }
@@ -1295,38 +1297,78 @@ static int device_chooser(pcapng_device_t *devs, int n)
 {
   gtcaca_window_widget_t *win;
   gtcaca_textlist_widget_t *tl;
-  char **lines;
+  gtcaca_label_widget_t *info;
+  char **lines;                 /* strings currently shown (owned)             */
+  int   *filt;                  /* display row -> device index                 */
+  int    nlines = 0;
+  char   search[128] = "", infobuf[200];
+  int    searching = 0, dirty = 1;
   int w, h, i, chosen = -1;
   int W = caca_get_canvas_width(gmo.cv), H = caca_get_canvas_height(gmo.cv);
   caca_event_t ev;
 
   w = 62; if (w > W - 4) w = W - 4;
-  h = n + 4; if (h > H - 4) h = H - 4; if (h < 6) h = 6;
-  win = gtcaca_window_new_centered(NULL, "Capture \xe2\x80\x94 choose interface", w, h);
-  tl  = gtcaca_textlist_new(GTCACA_WIDGET(win), 2, 1);
-  lines = calloc((size_t)n, sizeof *lines);   /* textlist stores our pointers */
-  for (i = 0; i < n; i++) {
-    char line[220];
-    snprintf(line, sizeof line, "%-16s %s", devs[i].name,
-             devs[i].description[0] ? devs[i].description : (devs[i].loopback ? "(loopback)" : ""));
-    lines[i] = strdup(line);
-    gtcaca_textlist_append(tl, lines[i]);
-  }
-  tl->has_focus = 1;
+  h = n + 6; if (h > H - 4) h = H - 4; if (h < 8) h = 8;
+  win  = gtcaca_window_new_centered(NULL, "Capture \xe2\x80\x94 choose interface", w, h);
+  tl   = gtcaca_textlist_new(GTCACA_WIDGET(win), 2, 1);
+  info = gtcaca_label_new(GTCACA_WIDGET(win), "", 2, h - 2);
+  lines = calloc((size_t)n, sizeof *lines);
+  filt  = calloc((size_t)n, sizeof *filt);
+
   for (;;) {
     int k;
+    if (dirty) {                                   /* (re)build the filtered list */
+      for (i = 0; i < nlines; i++) free(lines[i]);
+      gtcaca_textlist_clear(tl);
+      nlines = 0;
+      for (i = 0; i < n; i++) {
+        char line[220];
+        if (search[0] && !ci_contains(devs[i].name, search) &&
+            !ci_contains(devs[i].description, search)) continue;
+        snprintf(line, sizeof line, "%-16s %s", devs[i].name,
+                 devs[i].description[0] ? devs[i].description : (devs[i].loopback ? "(loopback)" : ""));
+        lines[nlines] = strdup(line);
+        filt[nlines] = i;
+        gtcaca_textlist_append(tl, lines[nlines]);
+        nlines++;
+      }
+      if (tl->selected_item >= (unsigned)nlines) tl->selected_item = nlines ? (unsigned)(nlines - 1) : 0;
+      dirty = 0;
+    }
+    if (searching) snprintf(infobuf, sizeof infobuf, "/%s_    Esc: clear  Enter: select", search);
+    else           snprintf(infobuf, sizeof infobuf, "/ filter   Up/Down: move (wraps)   Enter: select   Esc: cancel");
+    info->label = infobuf; info->width = w - 4;
+    tl->has_focus = 1;
+
     gtcaca_redraw();
     if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
     k = caca_get_event_key_ch(&ev);
-    if (k == CACA_KEY_ESCAPE || k == 'q') { chosen = -1; break; }
-    if (k == CACA_KEY_RETURN || k == 10) { chosen = (int)tl->selected_item; break; }
-    if (tl->private_key_cb) tl->private_key_cb(tl, k, NULL);
+
+    if (k == '/' && !searching) { searching = 1; search[0] = '\0'; dirty = 1; continue; }
+    if (k == CACA_KEY_ESCAPE) {
+      if (searching) { searching = 0; search[0] = '\0'; dirty = 1; continue; }
+      chosen = -1; break;
+    }
+    if (k == CACA_KEY_RETURN || k == 10) { chosen = nlines ? filt[tl->selected_item] : -1; break; }
+    if (searching) {
+      int sl = (int)strlen(search);
+      if (k == CACA_KEY_BACKSPACE || k == CACA_KEY_DELETE) {
+        if (sl > 0) search[sl - 1] = '\0'; else searching = 0;
+        dirty = 1;
+      } else if (k >= 32 && k < 127 && sl < (int)sizeof search - 1) {
+        search[sl] = (char)k; search[sl + 1] = '\0'; dirty = 1;
+      }
+      continue;
+    }
+    if (tl->private_key_cb) tl->private_key_cb(tl, k, NULL);   /* Up/Down now wrap */
   }
+
   gtcaca_textlist_clear(tl);
-  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tl));  free(tl);
-  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
-  for (i = 0; i < n; i++) free(lines[i]);
-  free(lines);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(info)); free(info);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tl));   free(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));  free(win);
+  for (i = 0; i < nlines; i++) free(lines[i]);
+  free(lines); free(filt);
   if (app.menu) { app.menu->is_open = 0; app.menu->has_focus = 0; }
   return chosen;
 }
@@ -1354,6 +1396,14 @@ static void act_capture_start(void *u)
 
 static void act_capture_stop(void *u) { (void)u; stop_capture(); }
 
+static void act_capture_restart(void *u)
+{
+  (void)u;
+  if (!app.cap_iface[0]) { act_capture_start(NULL); return; }  /* nothing yet → choose */
+  stop_capture();
+  start_capture(app.cap_iface, app.cap_filter);                /* same iface + filter, fresh */
+}
+
 static void build_menu(void)
 {
   int e;
@@ -1375,8 +1425,9 @@ static void build_menu(void)
   g_item_bytes   = gtcaca_menu_add_item(app.menu, g_view_entry, "[x] Packet Bytes",   "", act_toggle_bytes,   NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Capture");
-  gtcaca_menu_add_item(app.menu, e, "Start\xe2\x80\xa6",     "",    act_capture_start, NULL);
-  gtcaca_menu_add_item(app.menu, e, "Stop",                 "",    act_capture_stop,  NULL);
+  gtcaca_menu_add_item(app.menu, e, "Start\xe2\x80\xa6",     "",    act_capture_start,   NULL);
+  gtcaca_menu_add_item(app.menu, e, "Stop",                 "",    act_capture_stop,    NULL);
+  gtcaca_menu_add_item(app.menu, e, "Restart",              "",    act_capture_restart, NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Analyze");
   gtcaca_menu_add_item(app.menu, e, "Follow TCP Stream",    "",    act_follow_tcp, NULL);
