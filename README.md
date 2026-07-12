@@ -219,11 +219,22 @@ them to a release when a `v*` tag is pushed. Cross-compiling is intentionally
 avoided — each platform builds natively (libcaca's terminal backends make
 cross-builds of the C dependencies more trouble than a CI matrix).
 
+## Live capture
+
+**Capture ▸ Start…** lists your interfaces (via libpcapng's live-capture API),
+lets you pick one and optionally enter a capture filter (Wireshark display-
+filter syntax, applied in-kernel), and streams packets into the table in real
+time — the display filter still narrows what's shown, and the view auto-follows
+the newest packet. **Capture ▸ Stop** ends it.
+
+Opening an interface needs privileges: **root**, or on Linux
+`sudo setcap cap_net_raw+eip $(readlink -f ./caracal)`. Listing interfaces does
+not. Captured frames are assumed Ethernet.
+
 ## Scope / limitations
 
-- **Reading only** — live capture is not implemented (libpcapng has no live
-  capture path yet). pcapng is read via libpcapng; classic `.pcap` via a small
-  built-in reader.
+- pcapng is read via libpcapng; classic `.pcap` via a small built-in reader;
+  live capture via libpcapng's capture API (Linux `PACKET_MMAP`, macOS `bpf`).
 - Built-in dissectors: Ethernet/802.1Q, IPv4, IPv6 (base header), ARP, TCP,
   UDP, ICMP/ICMPv6, DNS. Everything else is reachable through `.posa`.
 - Filters use "any" matching semantics for multi-valued fields, like Wireshark.

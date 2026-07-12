@@ -57,7 +57,13 @@ for l in "$OUT"/lib/*.dylib; do codesign -f -s - "$l" 2>/dev/null || true; done
 cp -R "$ROOT/protos" "$ROOT/grammars" "$ROOT/scripts" "$OUT/share/caracal/" 2>/dev/null || true
 cat > "$OUT/caracal" <<'SH'
 #!/usr/bin/env bash
-here="$(cd "$(dirname "$0")" && pwd)"
+# resolve symlinks (e.g. /usr/local/bin/caracal -> the bundle) to find our dir
+src="$0"
+while [ -h "$src" ]; do
+  d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$d/$src" ;; esac
+done
+here="$(cd "$(dirname "$src")" && pwd)"
 export CARACAL_PROTOS_DIR="$here/share/caracal/protos"
 export CARACAL_GRAMMARS_DIR="$here/share/caracal/grammars"
 exec "$here/bin/caracal" "$@"

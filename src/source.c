@@ -38,6 +38,14 @@ static int cap_push(capture_t *cap, const uint8_t *data, uint32_t caplen,
   return 0;
 }
 
+/* Public append (used by live capture): returns the new packet index or -1. */
+long capture_append(capture_t *cap, const uint8_t *data, uint32_t caplen,
+                    uint32_t origlen, uint64_t ts_us, uint16_t linktype)
+{
+  if (cap_push(cap, data, caplen, origlen, ts_us, linktype) != 0) return -1;
+  return cap->count - 1;
+}
+
 /* ── optional load-progress callback ────────────────────────────────────── */
 static void (*g_progress)(void *ud, double frac);
 static void  *g_progress_ud;
