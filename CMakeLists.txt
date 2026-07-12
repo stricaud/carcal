@@ -89,6 +89,7 @@ add_executable(caracal
   src/posa.c
   src/filter.c
   src/field.c
+  src/rules.c
   src/lua_run.c)
 
 target_include_directories(caracal PRIVATE

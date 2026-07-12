@@ -192,6 +192,18 @@ cfilter_t *filter_compile(const char *expr, char *errbuf, size_t errlen);
 int        filter_eval(const cfilter_t *f, cfield_t *root);
 void       filter_free(cfilter_t *f);
 
+/* ── rules.c — decoder rules ────────────────────────────────────────────── */
+/* A rule maps a display-filter condition to a posa decoder: when the condition
+   matches a packet's dissection, that decoder is applied to the transport
+   payload. Lets you pick a decoder by protocol/field/heuristic, not just port. */
+int  rules_add(const char *expr, const char *proto, char *errbuf, size_t errlen);
+int  rules_load_file(const char *path, char *errbuf, size_t errlen); /* "cond => Decoder" lines */
+void rules_load_defaults(void);
+const char *rules_match(cfield_t *root);   /* decoder name for a dissection, or NULL */
+int  rules_count(void);
+int  rules_get(int i, char *expr, size_t elen, char *proto, size_t plen);
+void rules_clear(void);
+
 /* TCP stream reassembly now lives in libpcapng (pcapng_tcp_reasm_*,
    <libpcapng/reassembly_tcp.h>) — it is a library feature, not caracal's. */
 

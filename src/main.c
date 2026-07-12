@@ -44,6 +44,7 @@
 
 #include <libpcapng/reassembly_tcp.h>   /* pcapng_tcp_reasm_* for Follow TCP Stream */
 #include <libpcapng/capture.h>          /* pcapng_capture_* for live capture       */
+#include <libpcapng/dissect.h>          /* pcapng_dissect_protocols                */
 #include <gtcaca/textlist.h>            /* interface chooser                       */
 
 #include "caracal.h"
@@ -64,6 +65,26 @@ static const char *protos_dir(void)
 { const char *e = getenv("CARACAL_PROTOS_DIR"); return (e && *e) ? e : CARACAL_PROTOS_DIR; }
 static const char *grammars_dir(void)
 { const char *e = getenv("CARACAL_GRAMMARS_DIR"); return (e && *e) ? e : CARACAL_GRAMMARS_DIR; }
+
+/* Load bundled posa decoders + the default/embedded decoder rules + an optional
+   user rules file (protos/decoders.rules). Called once per run. */
+static void load_decoders(void)
+{
+  char rp[1200];
+
+  posa_load_dir(protos_dir());    /* bundled user-defined (.posa) decoders     */
+  rules_load_defaults();          /* compiled-in default decoder rules         */
+  snprintf(rp, sizeof rp, "%s/decoders.rules", protos_dir());
+  rules_load_file(rp, NULL, 0);   /* optional user rules (protos/decoders.rules) */
+}
+
+/* "Decode As" a port: add a rule "<udp|tcp>.port == <port> => <Proto>". */
+static void add_port_rule(const char *transport, unsigned port, const char *proto)
+{
+  char cond[80];
+  snprintf(cond, sizeof cond, "%s.port == %u", transport, port);
+  rules_add(cond, proto, NULL, 0);
+}
 
 enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE, FOCUS_HEX, FOCUS_COUNT };
 
@@ -618,9 +639,10 @@ static void act_decode_as(void *u)
       return;
     }
   }
-  if (!strcmp(transport, "udp"))      posa_bind_udp((uint16_t)port, proto);
-  else if (!strcmp(transport, "tcp")) posa_bind_tcp((uint16_t)port, proto);
-  else { gtcaca_dialog_message("Decode As", "Transport must be 'udp' or 'tcp'."); return; }
+  if (strcmp(transport, "udp") && strcmp(transport, "tcp")) {
+    gtcaca_dialog_message("Decode As", "Transport must be 'udp' or 'tcp'."); return;
+  }
+  add_port_rule(transport, port, proto);
 
   invalidate_summaries();
   view_rebuild();
@@ -1109,37 +1131,47 @@ static void act_posa_new(void *u)
   modal_close_menu();
 }
 
-/* ── Decoders window (list built-in + posa, import, new) ────────────────── */
-static const char *BUILTIN_DECODERS[] = {
-  "frame","eth","vlan","ip","ipv6","arp","tcp","udp","icmp","icmpv6","igmp","gre",
-  "dns","mdns","llmnr","nbns","ntp","dhcp","snmp","radius","syslog",
-  "tls","ssh","http","ftp","smtp","pop","imap","telnet","irc","redis","rdp"
-};
-
+/* ── Decoders window (list built-in libpcapng protocols + posa + rules) ─── */
 static void decoders_fill(gtcaca_textview_widget_t *tv)
 {
-  char line[160];
-  int i, n = (int)(sizeof BUILTIN_DECODERS / sizeof *BUILTIN_DECODERS);
+  char line[200];
+  const char *const *builtins;
+  int i, n = 0;
   gtcaca_textview_clear(tv);
-  gtcaca_textview_append(tv, "Built-in decoders:");
+
+  builtins = pcapng_dissect_protocols(&n);
+  snprintf(line, sizeof line, "Built-in decoders (libpcapng, %d):", n);
+  gtcaca_textview_append(tv, line);
   for (i = 0; i < n; i += 6) {
     int j, o = 2;
     line[0] = ' '; line[1] = ' ';
     for (j = i; j < i + 6 && j < n; j++)
-      o += snprintf(line + o, sizeof line - o, "%-13s", BUILTIN_DECODERS[j]);
+      o += snprintf(line + o, sizeof line - o, "%-12s", builtins[j]);
     line[o] = '\0';
     gtcaca_textview_append(tv, line);
   }
+
   gtcaca_textview_append(tv, "");
-  snprintf(line, sizeof line, "Loaded .posa decoders (%d):", posa_count());
+  snprintf(line, sizeof line, "Custom .posa decoders (%d):", posa_count());
   gtcaca_textview_append(tv, line);
   for (i = 0; i < posa_count(); i++) {
     const posa_proto_t *p = posa_at(i);
     snprintf(line, sizeof line, "  %-24s  (group: %s)", p->name, p->parent);
     gtcaca_textview_append(tv, line);
   }
+
   gtcaca_textview_append(tv, "");
-  gtcaca_textview_append(tv, "[i] import .posa    [n] new decoder    [Esc] close");
+  snprintf(line, sizeof line, "Decoder rules (%d)   [ condition => decoder ]:", rules_count());
+  gtcaca_textview_append(tv, line);
+  for (i = 0; i < rules_count(); i++) {
+    char expr[192], proto[64];
+    rules_get(i, expr, sizeof expr, proto, sizeof proto);
+    snprintf(line, sizeof line, "  %-40s => %s", expr, proto);
+    gtcaca_textview_append(tv, line);
+  }
+
+  gtcaca_textview_append(tv, "");
+  gtcaca_textview_append(tv, "[i] import .posa   [n] new decoder   [r] add rule   [Esc] close");
 }
 
 static void act_decoders(void *u)
@@ -1167,6 +1199,28 @@ static void act_decoders(void *u)
         if (posa_load_file(path, err, sizeof err) < 0) gtcaca_dialog_message("Import failed", err);
         else { invalidate_summaries(); view_rebuild();
                detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0); }
+      }
+      decoders_fill(tv);
+      continue;
+    }
+    if (k == 'r') {
+      char in[256], err[160] = "";
+      /* "<condition> => <Decoder>", e.g. "tcp.port == 3306 => MySQL" */
+      if (prompt_line("Rule (condition => Decoder):  ", in, sizeof in)) {
+        char *arrow = strstr(in, "=>");
+        if (!arrow) gtcaca_dialog_message("Add rule", "Expected: <condition> => <Decoder>");
+        else {
+          char *cond = in, *proto = arrow + 2;
+          *arrow = '\0';
+          while (*cond == ' ') cond++;
+          while (*proto == ' ') proto++;
+          { char *e = cond + strlen(cond); while (e > cond && e[-1] == ' ') *--e = '\0'; }
+          { char *e = proto + strlen(proto); while (e > proto && e[-1] == ' ') *--e = '\0'; }
+          if (rules_add(cond, proto, err, sizeof err) < 0)
+            gtcaca_dialog_message("Add rule", err[0] ? err : "invalid rule");
+          else { invalidate_summaries(); view_rebuild();
+                 detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0); }
+        }
       }
       decoders_fill(tv);
       continue;
@@ -1499,14 +1553,13 @@ static int dump_mode(const char *path, const char *expr)
   long i, shown = 0;
   int printed_detail = 0;
 
-  posa_load_dir(protos_dir());
+  load_decoders();
   /* Optional port binding for scripted testing, e.g. CARACAL_BIND="udp 69 TFTP" */
   {
     const char *b = getenv("CARACAL_BIND");
     char tr[16], pr[64]; unsigned pt;
     if (b && sscanf(b, "%15s %u %63s", tr, &pt, pr) == 3) {
-      if (!strcmp(tr, "udp")) posa_bind_udp((uint16_t)pt, pr);
-      else if (!strcmp(tr, "tcp")) posa_bind_tcp((uint16_t)pt, pr);
+      add_port_rule(tr, pt, pr);
     }
   }
   if (capture_load(path, &cap, err, sizeof err) != 0) {
@@ -1552,9 +1605,10 @@ static void apply_bind(const char *spec)   /* "udp 69 TFTP" */
     fprintf(stderr, "caracal: bad -X binding '%s' (want '<udp|tcp> <port> <Proto>')\n", spec);
     return;
   }
-  if (!strcmp(tr, "udp")) posa_bind_udp((uint16_t)pt, pr);
-  else if (!strcmp(tr, "tcp")) posa_bind_tcp((uint16_t)pt, pr);
-  else fprintf(stderr, "caracal: -X transport must be udp or tcp\n");
+  if (strcmp(tr, "udp") && strcmp(tr, "tcp")) {
+    fprintf(stderr, "caracal: -X transport must be udp or tcp\n"); return;
+  }
+  add_port_rule(tr, pt, pr);
 }
 
 static int lua_cli(int argc, char **argv)
@@ -1579,7 +1633,7 @@ static int lua_cli(int argc, char **argv)
   if (!script) { fprintf(stderr, "caracal: -s <script.lua> is required\n"); return 2; }
   if (!capf)   { fprintf(stderr, "caracal: -r <capture> is required\n"); return 2; }
 
-  posa_load_dir(protos_dir());
+  load_decoders();
   for (i = 0; i < nposas; i++) {
     if (posa_load_file(posas[i], err, sizeof err) < 0)
       fprintf(stderr, "caracal: -p %s: %s\n", posas[i], err);
@@ -1636,7 +1690,7 @@ int main(int argc, char **argv)
   }
 
   /* Load bundled protocol definitions (best effort). */
-  posa_load_dir(protos_dir());
+  load_decoders();
 
   W = caca_get_canvas_width(gmo.cv);
   H = caca_get_canvas_height(gmo.cv);
