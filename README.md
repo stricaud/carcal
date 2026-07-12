@@ -1,5 +1,7 @@
 # caracal
 
+![caracal in action](caracalui.png)
+
 A terminal packet analyzer — a tiny Wireshark for the TUI. caracal opens
 pcap/pcapng captures, lists packets in a **table view**, shows the selected
 packet's protocol layers in a **tree view**, and filters with a

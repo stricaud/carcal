@@ -135,6 +135,7 @@ typedef struct {
 
 static app_t app;
 static int   g_quit = 0;   /* set by File > Quit; the event loop checks it */
+static const char *g_pending_graph;  /* --graph <entity>: open explorer at start */
 
 /* ───────────────────────── view (filtered index list) ─────────────────── */
 static void view_push(long idx)
@@ -1807,6 +1808,149 @@ static void act_netflow(void *u)
       }
 }
 
+/* ══ Entity Explorer (Maltego-style pivoting over connections) ══════════════
+ * Start from an IP or a port and expand its connections on demand; re-root to
+ * pivot on any node, and pull the matching packets into the main view. Built on
+ * the mind-map widget with lazy expansion driven by the NetFlow flow model. */
+typedef struct { int kind; char ip[48]; int port; int expanded; } expl_ent_t; /* 0=IP 1=PORT */
+typedef struct { expl_ent_t **v; int n, c; } expl_pool_t;
+
+static expl_ent_t *expl_ent_new(expl_pool_t *pool, int kind, const char *ip, int port)
+{
+  expl_ent_t *e = calloc(1, sizeof *e);
+  e->kind = kind; e->port = port;
+  if (ip) snprintf(e->ip, sizeof e->ip, "%s", ip);
+  if (pool->n == pool->c) { int nc = pool->c ? pool->c * 2 : 64;
+    pool->v = realloc(pool->v, (size_t)nc * sizeof *pool->v); pool->c = nc; }
+  pool->v[pool->n++] = e;
+  return e;
+}
+static void expl_pool_free(expl_pool_t *pool)
+{ int i; for (i = 0; i < pool->n; i++) free(pool->v[i]); free(pool->v); }
+
+static void expl_ent_label(const expl_ent_t *e, char *out, size_t n)
+{ if (e->kind == 1) snprintf(out, n, "port %d", e->port); else snprintf(out, n, "%s", e->ip); }
+
+/* Expand an entity node: add a child per connection touching it. */
+static void expl_expand(gtcaca_mindmap_widget_t *mm, gtcaca_mm_node_t *node, expl_pool_t *pool)
+{
+  expl_ent_t *e = node->userdata;
+  int i, added = 0;
+  if (!e) return;
+  if (e->expanded) { gtcaca_mindmap_toggle_fold(node); return; }
+  e->expanded = 1; node->folded = 0;
+  for (i = 0; i < g_nf->nflows; i++) {
+    nf_flow_t *f = &g_nf->flows[i];
+    gtcaca_mm_node_t *cn; char lbl[120];
+    if (e->kind == 0) {                         /* IP → each conversation */
+      int a = !strcmp(f->ipa, e->ip), b = !strcmp(f->ipb, e->ip);
+      const char *peer; int pport; char ep[64];
+      if (!a && !b) continue;
+      peer = a ? f->ipb : f->ipa; pport = a ? f->portb : f->porta;
+      nf_ep(peer, pport, ep, sizeof ep);
+      snprintf(lbl, sizeof lbl, "%-4s \xe2\x86\x92 %-28s  %ld pkts  %ld B", f->proto, ep, f->npk, f->bytes);
+      cn = gtcaca_mindmap_add_child(mm, node, lbl);
+      if (cn) cn->userdata = expl_ent_new(pool, 0, peer, 0);
+      added++;
+    } else {                                    /* PORT → each host using it */
+      int a = (f->porta == e->port), b = (f->portb == e->port);
+      const char *host;
+      if (!a && !b) continue;
+      host = a ? f->ipa : f->ipb;
+      snprintf(lbl, sizeof lbl, "%-4s  %-30s  %ld pkts", f->proto, host, f->npk);
+      cn = gtcaca_mindmap_add_child(mm, node, lbl);
+      if (cn) cn->userdata = expl_ent_new(pool, 0, host, 0);
+      added++;
+    }
+  }
+  if (!added) { gtcaca_mm_node_t *cn = gtcaca_mindmap_add_child(mm, node, "(no connections)");
+                if (cn) cn->userdata = NULL; }
+}
+
+static void expl_set_root(gtcaca_mindmap_widget_t *mm, expl_pool_t *pool, expl_ent_t *root)
+{
+  char lbl[80];
+  gtcaca_mm_node_t *r;
+  expl_ent_label(root, lbl, sizeof lbl);
+  gtcaca_mindmap_clear(mm, lbl);
+  r = gtcaca_mindmap_root(mm);
+  root->expanded = 0;
+  r->userdata = root;
+  expl_expand(mm, r, pool);
+}
+
+/* Build a display filter that pulls the packets touching an entity. */
+static void expl_filter_for(const expl_ent_t *e, char *out, size_t n)
+{
+  if (e->kind == 1)            snprintf(out, n, "tcp.port == %d || udp.port == %d", e->port, e->port);
+  else if (strchr(e->ip, ':')) snprintf(out, n, "ipv6.addr == %s", e->ip);
+  else                         snprintf(out, n, "ip.addr == %s", e->ip);
+}
+
+static void explorer_run(int kind, const char *ip, int port)
+{
+  gtcaca_window_widget_t *win;
+  gtcaca_mindmap_widget_t *mm;
+  gtcaca_label_widget_t *help;
+  expl_pool_t pool;
+  expl_ent_t *root;
+  int w, h;
+  char vfilter[160] = "";
+  caca_event_t ev;
+
+  if (app.nview == 0) { gtcaca_dialog_message("Entity Explorer", "No packets to explore."); return; }
+  g_nf = nf_build();
+  memset(&pool, 0, sizeof pool);
+  root = expl_ent_new(&pool, kind, ip, port);
+
+  win  = modal_window("Entity Explorer", &w, &h);
+  mm   = gtcaca_mindmap_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 3);
+  gtcaca_mindmap_set_title(mm, "Connections");
+  help = gtcaca_label_new(GTCACA_WIDGET(win),
+           "  \xe2\x86\x91\xe2\x86\x93 nav   Enter expand/collapse   r re-root (pivot)   v view packets   Esc close", 2, h - 2);
+  help->width = w - 4;
+  expl_set_root(mm, &pool, root);
+  mm->has_focus = 1;
+
+  for (;;) {
+    int k;
+    gtcaca_mm_node_t *sel;
+    gtcaca_redraw();
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    sel = gtcaca_mindmap_selected(mm);
+    if (k == CACA_KEY_ESCAPE || k == 'q') break;
+    else if (k == CACA_KEY_RETURN || k == 10) { if (sel) expl_expand(mm, sel, &pool); }
+    else if (k == 'r') { if (sel && sel->userdata) expl_set_root(mm, &pool, (expl_ent_t *)sel->userdata); }
+    else if (k == 'v') { if (sel && sel->userdata) { expl_filter_for((expl_ent_t *)sel->userdata, vfilter, sizeof vfilter); break; } }
+    else gtcaca_mindmap_key(mm, k, NULL);
+  }
+
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(help)); free(help);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(mm));   gtcaca_mindmap_free(mm);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));  free(win);
+  expl_pool_free(&pool);
+  nf_free(g_nf); g_nf = NULL;
+  modal_close_menu();
+
+  if (vfilter[0]) apply_filter(vfilter);   /* pivot the main view to the entity */
+}
+
+static void act_entity_explorer(void *u)
+{
+  char start[64] = "";
+  long sel = app.table ? gtcaca_table_selected_row(app.table) : -1;
+  long pidx = view_pkt_index(sel);
+  int isport = 1, i;
+  (void)u;
+  if (pidx >= 0) { dissect_summarize(&app.cap.pkts[pidx]);
+                   snprintf(start, sizeof start, "%s", app.cap.pkts[pidx].col_src); }
+  if (!prompt_line("Start entity (IP or port):  ", start, sizeof start) || !start[0]) return;
+  for (i = 0; start[i]; i++) if (!isdigit((unsigned char)start[i])) { isport = 0; break; }
+  if (isport) explorer_run(1, NULL, atoi(start));
+  else        explorer_run(0, start, 0);
+}
+
 /* ── posa editor (with a help panel) ────────────────────────────────────── */
 static const char POSA_TEMPLATE[] =
   "# A custom protocol decoder (.posa).\n"
@@ -2261,6 +2405,7 @@ static void build_menu(void)
   e = gtcaca_menu_add_entry(app.menu, "Statistics");
   gtcaca_menu_add_item(app.menu, e, "Protocol Hierarchy",   "",    act_proto_stats, NULL);
   gtcaca_menu_add_item(app.menu, e, "Conversations (NetFlow)", "", act_netflow,   NULL);
+  gtcaca_menu_add_item(app.menu, e, "Entity Explorer\xe2\x80\xa6",   "", act_entity_explorer, NULL);
   gtcaca_menu_add_item(app.menu, e, "IO Graph",             "",    act_io_graph,  NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Help");
@@ -2540,15 +2685,33 @@ int main(int argc, char **argv)
   relayout();
   update_view_labels();
 
-  /* Open a file passed on the command line. */
-  if (argc > 1) load_capture(argv[1]);
-  else { app.filter = filter_compile("", NULL, 0); }
+  /* Open a file passed on the command line. Optional: --graph <ip|port> opens
+     the Entity Explorer rooted at that entity once the capture is loaded. */
+  {
+    const char *capfile = NULL, *graph_entity = NULL;
+    int ai;
+    for (ai = 1; ai < argc; ai++) {
+      if (!strcmp(argv[ai], "--graph") && ai + 1 < argc) graph_entity = argv[++ai];
+      else if (argv[ai][0] != '-' && !capfile) capfile = argv[ai];
+    }
+    if (capfile) load_capture(capfile);
+    else app.filter = filter_compile("", NULL, 0);
+    g_pending_graph = graph_entity;
+  }
 
   app.focus = FOCUS_TABLE;
 
   /* ── event loop ──────────────────────────────────────────────────────── */
   caca_set_mouse(gmo.dp, 1);
   redraw();
+  if (g_pending_graph && g_pending_graph[0]) {   /* --graph <ip|port> */
+    int isport = 1, j;
+    for (j = 0; g_pending_graph[j]; j++)
+      if (!isdigit((unsigned char)g_pending_graph[j])) { isport = 0; break; }
+    if (isport) explorer_run(1, NULL, atoi(g_pending_graph));
+    else        explorer_run(0, g_pending_graph, 0);
+    redraw();
+  }
   while (!g_quit) {
     caca_event_t ev;
     int t, key;
