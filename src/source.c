@@ -46,6 +46,80 @@ long capture_append(capture_t *cap, const uint8_t *data, uint32_t caplen,
   return cap->count - 1;
 }
 
+/* ── save a capture to pcapng ───────────────────────────────────────────── */
+#define SAVE_MAX_IFACES 64
+
+static int grow_buf(unsigned char **buf, size_t *cap, size_t need)
+{
+  if (need <= *cap) return 0;
+  { unsigned char *nb = realloc(*buf, need);
+    if (!nb) return -1;
+    *buf = nb; *cap = need; }
+  return 0;
+}
+
+long capture_save(const capture_t *cap, const char *path, const uint8_t *keep,
+                  char *errbuf, size_t errlen)
+{
+  FILE *fp;
+  unsigned char *buf = NULL;
+  size_t bufsz = 0, n;
+  uint16_t lts[SAVE_MAX_IFACES];   /* distinct linktype per interface id */
+  int nlts = 0, j;
+  long i, written = 0;
+
+  fp = fopen(path, "wb");
+  if (!fp) { if (errbuf) snprintf(errbuf, errlen, "cannot open %s for writing", path); return -1; }
+
+  /* Distinct linktypes among the packets we will write → one IDB each. */
+  for (i = 0; i < cap->count; i++) {
+    const cpkt_t *p = &cap->pkts[i];
+    if (p->is_custom || (keep && !keep[i])) continue;
+    for (j = 0; j < nlts; j++) if (lts[j] == p->linktype) break;
+    if (j == nlts && nlts < SAVE_MAX_IFACES) lts[nlts++] = p->linktype;
+  }
+  if (nlts == 0) lts[nlts++] = LINKTYPE_ETHERNET;   /* nothing selected: valid empty file */
+
+  /* Section Header Block. */
+  if (grow_buf(&buf, &bufsz, libpcapng_section_header_block_size()) != 0) goto oom;
+  n = libpcapng_section_header_block_write(buf);
+  if (fwrite(buf, 1, n, fp) != n) goto werr;
+
+  /* One Interface Description Block per distinct linktype. */
+  for (j = 0; j < nlts; j++) {
+    if (grow_buf(&buf, &bufsz, libpcapng_interface_description_block_size()) != 0) goto oom;
+    n = libpcapng_interface_description_block_write_with_linktype(0 /*snaplen: unlimited*/, buf, lts[j]);
+    if (fwrite(buf, 1, n, fp) != n) goto werr;
+  }
+
+  /* Enhanced Packet Block per kept packet. */
+  for (i = 0; i < cap->count; i++) {
+    const cpkt_t *p = &cap->pkts[i];
+    uint32_t ts_hi, ts_lo;
+    int ifid = 0;
+    if (p->is_custom || (keep && !keep[i])) continue;
+    for (j = 0; j < nlts; j++) if (lts[j] == p->linktype) { ifid = j; break; }
+    ts_hi = (uint32_t)(p->ts_us >> 32);
+    ts_lo = (uint32_t)(p->ts_us & 0xffffffffULL);
+    if (grow_buf(&buf, &bufsz, libpcapng_enhanced_packet_block_size(p->caplen)) != 0) goto oom;
+    n = libpcapng_enhanced_packet_block_write_full(p->data, p->caplen, p->origlen,
+                                                   (uint32_t)ifid, ts_hi, ts_lo, NULL, 0, buf);
+    if (fwrite(buf, 1, n, fp) != n) goto werr;
+    written++;
+  }
+
+  free(buf);
+  if (fclose(fp) != 0) { if (errbuf) snprintf(errbuf, errlen, "write error on %s", path); return -1; }
+  return written;
+
+oom:
+  if (errbuf) snprintf(errbuf, errlen, "out of memory");
+  free(buf); fclose(fp); return -1;
+werr:
+  if (errbuf) snprintf(errbuf, errlen, "write error on %s", path);
+  free(buf); fclose(fp); return -1;
+}
+
 /* ── optional load-progress callback ────────────────────────────────────── */
 static void (*g_progress)(void *ud, double frac);
 static void  *g_progress_ud;

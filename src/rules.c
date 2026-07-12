@@ -1,0 +1,115 @@
+/* rules.c — decoder rules: a display-filter condition selects a posa decoder.
+ *
+ * Each rule is  "<display-filter condition> => <DecoderName>".  When a packet's
+ * dissection satisfies the condition, the named posa protocol is applied to its
+ * transport payload. This generalises port-based "Decode As" to any condition
+ * expressible as a Wireshark-style filter (protocol, field, heuristic).
+ */
+#include "caracal.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_RULES 128
+
+typedef struct {
+  cfilter_t *cond;
+  char       expr[192];
+  char       proto[64];
+  int        used;
+} rule_t;
+
+static rule_t g_rules[MAX_RULES];
+static int    g_nrules;
+
+int rules_count(void) { return g_nrules; }
+
+int rules_get(int i, char *expr, size_t elen, char *proto, size_t plen)
+{
+  if (i < 0 || i >= g_nrules) return -1;
+  if (expr)  snprintf(expr,  elen, "%s", g_rules[i].expr);
+  if (proto) snprintf(proto, plen, "%s", g_rules[i].proto);
+  return 0;
+}
+
+void rules_clear(void)
+{
+  int i;
+  for (i = 0; i < g_nrules; i++) { filter_free(g_rules[i].cond); g_rules[i].cond = NULL; }
+  g_nrules = 0;
+}
+
+int rules_add(const char *expr, const char *proto, char *errbuf, size_t errlen)
+{
+  cfilter_t *f;
+  rule_t *r;
+  if (!expr || !*expr || !proto || !*proto) {
+    if (errbuf) snprintf(errbuf, errlen, "rule needs a condition and a decoder");
+    return -1;
+  }
+  if (g_nrules >= MAX_RULES) {
+    if (errbuf) snprintf(errbuf, errlen, "too many rules");
+    return -1;
+  }
+  f = filter_compile(expr, errbuf, errlen);
+  if (!f) return -1;
+  r = &g_rules[g_nrules++];
+  r->cond = f;
+  snprintf(r->expr,  sizeof r->expr,  "%s", expr);
+  snprintf(r->proto, sizeof r->proto, "%s", proto);
+  r->used = 1;
+  return 0;
+}
+
+const char *rules_match(cfield_t *root)
+{
+  int i;
+  for (i = 0; i < g_nrules; i++)
+    if (g_rules[i].used && filter_eval(g_rules[i].cond, root))
+      return g_rules[i].proto;
+  return NULL;
+}
+
+static char *trim(char *s)
+{
+  char *e;
+  while (*s == ' ' || *s == '\t') s++;
+  e = s + strlen(s);
+  while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = '\0';
+  return s;
+}
+
+int rules_load_file(const char *path, char *errbuf, size_t errlen)
+{
+  FILE *fp = fopen(path, "r");
+  char line[512];
+  int n = 0;
+  if (!fp) { if (errbuf) snprintf(errbuf, errlen, "cannot open %s", path); return -1; }
+  while (fgets(line, sizeof line, fp)) {
+    char *hash = strchr(line, '#');
+    char *arrow, *cond, *proto;
+    if (hash) *hash = '\0';
+    arrow = strstr(line, "=>");
+    if (!arrow) continue;
+    *arrow = '\0';
+    cond  = trim(line);
+    proto = trim(arrow + 2);
+    if (!cond[0] || !proto[0]) continue;
+    if (rules_add(cond, proto, NULL, 0) == 0) n++;
+  }
+  fclose(fp);
+  return n;
+}
+
+/* Compiled-in defaults: standard protocols are decoded by libpcapng itself, so
+   the built-in rules just bind the bundled posa decoders. */
+void rules_load_defaults(void)
+{
+  static const char *const DEF[][2] = {
+    { "udp.port == 69", "TFTP" },   /* bundled protos/tftp.posa */
+  };
+  int i;
+  for (i = 0; i < (int)(sizeof DEF / sizeof DEF[0]); i++)
+    rules_add(DEF[i][0], DEF[i][1], NULL, 0);
+}

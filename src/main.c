@@ -609,6 +609,55 @@ static void act_reload(void *u)
   load_capture(path);
 }
 
+/* Write the packets flagged in keep[] (NULL = all) to `path`, then report. */
+static void write_capture(const char *path, const uint8_t *keep, const char *label)
+{
+  char err[256] = "", msg[320];
+  long n = capture_save(&app.cap, path, keep, err, sizeof err);
+  if (n < 0) { gtcaca_dialog_message("Save failed", err[0] ? err : "could not write file"); return; }
+  snprintf(msg, sizeof msg, "Wrote %ld %s packet%s to\n%s", n, label, n == 1 ? "" : "s", path);
+  gtcaca_dialog_message("Saved", msg);
+}
+
+/* Save dialog: a file chooser plus checkboxes choosing which packets to write.
+   Scope precedence: selected packet > displayed (filtered) > whole capture. */
+static void act_save(void *u)
+{
+  char path[1024];
+  gtcaca_fc_option_t opts[2] = {
+    { "Only save displayed (filtered) packets", 0 },
+    { "Only save the selected packet",          0 },
+  };
+  int states[2] = { 0, 0 };
+  long sel_idx = -1;
+  (void)u;
+  if (app.cap.count == 0) { gtcaca_dialog_message("Save", "No packets to save."); return; }
+  if (app.table && app.nview > 0) {
+    long row = gtcaca_table_selected_row(app.table);
+    if (row >= 0 && row < app.nview) sel_idx = app.view[row];
+  }
+  opts[0].initial = app.filter_text[0] ? 1 : 0;   /* default on when a filter is active */
+
+  if (!gtcaca_filechooser_run_opts(".", path, sizeof path, 1, opts, 2, states)) return;
+
+  if (states[1] && sel_idx >= 0) {                 /* selected packet only */
+    uint8_t *keep = calloc((size_t)app.cap.count, 1);
+    if (!keep) { gtcaca_dialog_message("Save failed", "out of memory"); return; }
+    keep[sel_idx] = 1;
+    write_capture(path, keep, "selected");
+    free(keep);
+  } else if (states[0]) {                          /* displayed (filtered) packets */
+    uint8_t *keep = calloc((size_t)app.cap.count, 1);
+    long i;
+    if (!keep) { gtcaca_dialog_message("Save failed", "out of memory"); return; }
+    for (i = 0; i < app.nview; i++) keep[app.view[i]] = 1;
+    write_capture(path, keep, "displayed");
+    free(keep);
+  } else {                                         /* whole capture */
+    write_capture(path, NULL, "captured");
+  }
+}
+
 static int confirm_quit(void)
 { return gtcaca_dialog_confirm("Quit caracal", "Are you sure you want to quit?"); }
 
@@ -1467,6 +1516,8 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Open\xe2\x80\xa6",     "F2",  act_open,      NULL);
   gtcaca_menu_add_item(app.menu, e, "Reload",               "",    act_reload,    NULL);
   gtcaca_menu_add_separator(app.menu, e);
+  gtcaca_menu_add_item(app.menu, e, "Save\xe2\x80\xa6",     "^S",  act_save,      NULL);
+  gtcaca_menu_add_separator(app.menu, e);
   gtcaca_menu_add_item(app.menu, e, "Quit",                 "^Q",  act_quit,      NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Edit");
@@ -1592,6 +1643,27 @@ static int dump_mode(const char *path, const char *expr)
     cfield_free(root);
   }
   printf("# %ld packet(s) matched\n", shown);
+
+  /* Test hook: CARACAL_SAVE=<path> writes the matched packets as pcapng. */
+  {
+    const char *sp = getenv("CARACAL_SAVE");
+    if (sp && *sp) {
+      uint8_t *keep = flt ? calloc((size_t)cap.count, 1) : NULL;
+      long n;
+      if (flt) {
+        for (i = 0; i < cap.count; i++) {
+          cfield_t *r = dissect_packet(&cap.pkts[i]);
+          if (filter_eval(flt, r)) keep[i] = 1;
+          cfield_free(r);
+        }
+      }
+      n = capture_save(&cap, sp, keep, err, sizeof err);
+      free(keep);
+      if (n < 0) fprintf(stderr, "caracal: save: %s\n", err);
+      else       printf("# saved %ld packet(s) to %s\n", n, sp);
+    }
+  }
+
   if (flt) filter_free(flt);
   capture_free(&cap);
   return 0;
@@ -1820,6 +1892,7 @@ int main(int argc, char **argv)
     if (key == CACA_KEY_F2)  { act_open(NULL); redraw(); continue; }
     if (key == CTRL('q'))    { if (confirm_quit()) break; redraw(); continue; }
     if (key == CTRL('o'))    { act_open(NULL); redraw(); continue; }
+    if (key == CTRL('s'))    { act_save(NULL); redraw(); continue; }
     if (key == CTRL('f'))    { act_find(NULL); redraw(); continue; }
     if (key == '\t') {
       app.focus = (app.focus + 1) % FOCUS_COUNT;

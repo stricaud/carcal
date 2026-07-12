@@ -106,6 +106,13 @@ void capture_set_progress(void (*cb)(void *ud, double frac), void *ud);
 long capture_append(capture_t *cap, const uint8_t *data, uint32_t caplen,
                     uint32_t origlen, uint64_t ts_us, uint16_t linktype);
 
+/* Write `cap` to `path` as pcapng. If `keep` is non-NULL it is an array of
+   cap->count flags; only packets with keep[i] != 0 are written (NULL = all).
+   pcapng Custom Blocks are skipped (they are not captured frames). Returns the
+   number of packets written, or -1 on error (message in errbuf). */
+long capture_save(const capture_t *cap, const char *path, const uint8_t *keep,
+                  char *errbuf, size_t errlen);
+
 /* ── dissect.c — bytes → cfield tree ────────────────────────────────────── */
 /* Build the dissection tree for one packet. Caller frees with cfield_free.
    Registered posa protocols (posa.c) participate in transport dissection. */
