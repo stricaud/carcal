@@ -45,6 +45,7 @@
 #include <libpcapng/reassembly_tcp.h>   /* pcapng_tcp_reasm_* for Follow TCP Stream */
 #include <libpcapng/capture.h>          /* pcapng_capture_* for live capture       */
 #include <libpcapng/dissect.h>          /* pcapng_dissect_protocols                */
+#include <libpcapng/objects.h>          /* pcapng_object_* for Export Objects       */
 #include <gtcaca/textlist.h>            /* interface chooser                       */
 
 #include "caracal.h"
@@ -769,6 +770,124 @@ static gtcaca_window_widget_t *modal_window(const char *title, int *ow, int *oh)
 static void modal_close_menu(void)
 { if (app.menu) { app.menu->is_open = 0; app.menu->has_focus = 0; } }
 
+/* ── Export Objects (files carved from streams by libpcapng) ─────────────── */
+static pcapng_object_extractor_t *extract_objects(pcapng_object_proto_t proto)
+{
+  pcapng_object_extractor_t *ex = pcapng_object_extractor_new(proto);
+  long i;
+  if (!ex) return NULL;
+  for (i = 0; i < app.cap.count; i++) {
+    cpkt_t *p = &app.cap.pkts[i];
+    if (p->is_custom) continue;
+    pcapng_object_extractor_add_packet(ex, (int)(i + 1), p->data, p->caplen, p->linktype);
+  }
+  pcapng_object_extractor_finish(ex);
+  return ex;
+}
+
+/* Save one object's bytes (name pre-filled from the object's filename). */
+static void save_one_object(const pcapng_object_t *o)
+{
+  char path[1024], msg[320];
+  FILE *fp;
+  if (!gtcaca_filechooser_run_named(".", o->filename, path, sizeof path)) return;
+  fp = fopen(path, "wb");
+  if (!fp) { gtcaca_dialog_message("Save failed", "could not open file for writing"); return; }
+  if (o->len) fwrite(o->data, 1, o->len, fp);
+  fclose(fp);
+  snprintf(msg, sizeof msg, "Wrote %zu bytes to\n%s", o->len, path);
+  gtcaca_dialog_message("Saved", msg);
+}
+
+/* Save every object into a chosen directory (index-prefixed to avoid clashes). */
+static void save_all_objects(pcapng_object_extractor_t *ex)
+{
+  char dir[1024], msg[160];
+  int i, n = pcapng_object_count(ex), ok = 0;
+  if (!prompt_line("Save all to directory:  ", dir, sizeof dir)) return;
+  if (!dir[0]) snprintf(dir, sizeof dir, ".");
+  for (i = 0; i < n; i++) {
+    const pcapng_object_t *o = pcapng_object_at(ex, i);
+    char path[1300]; FILE *fp;
+    snprintf(path, sizeof path, "%s/%03d-%s", dir, i + 1, o->filename);
+    fp = fopen(path, "wb");
+    if (fp) { if (o->len) fwrite(o->data, 1, o->len, fp); fclose(fp); ok++; }
+  }
+  snprintf(msg, sizeof msg, "Saved %d of %d object%s to\n%s", ok, n, n == 1 ? "" : "s", dir);
+  gtcaca_dialog_message("Export Objects", msg);
+}
+
+static void act_export_objects(pcapng_object_proto_t proto, const char *pname)
+{
+  pcapng_object_extractor_t *ex;
+  gtcaca_window_widget_t *win;
+  gtcaca_textlist_widget_t *tl;
+  gtcaca_label_widget_t *hdr, *hint;
+  char title[64], hbuf[160];
+  int w, h, n, i;
+  caca_event_t ev;
+
+  if (app.cap.count == 0) { gtcaca_dialog_message("Export Objects", "No packets loaded."); return; }
+  ex = extract_objects(proto);
+  n = ex ? pcapng_object_count(ex) : 0;
+  if (n == 0) {
+    if (ex) pcapng_object_extractor_free(ex);
+    gtcaca_dialog_message("Export Objects", "No objects found in this capture.");
+    modal_close_menu();
+    return;
+  }
+
+  snprintf(title, sizeof title, "Export %s Objects (%d)", pname, n);
+  win = modal_window(title, &w, &h);
+  snprintf(hbuf, sizeof hbuf, "  No.  %-22.22s %-20.20s %8s  %s",
+           "Hostname", "Content Type", "Size", "Filename");
+  hdr  = gtcaca_label_new(GTCACA_WIDGET(win), hbuf, 1, 1);
+  hdr->width = w - 2;
+  tl   = gtcaca_textlist_new(GTCACA_WIDGET(win), 1, 2);
+  gtcaca_textlist_widget_set_view_size(tl, h - 4);
+  hint = gtcaca_label_new(GTCACA_WIDGET(win),
+           "[Enter/s] save  [a] save all  [Esc] close", 1, h - 1);
+  hint->width = w - 2;
+
+  for (i = 0; i < n; i++) {
+    const pcapng_object_t *o = pcapng_object_at(ex, i);
+    char row[512];
+    snprintf(row, sizeof row, "%5d  %-22.22s %-20.20s %8zu%s %s",
+             o->frame, o->hostname, o->content_type[0] ? o->content_type : "-",
+             o->len, o->complete ? " " : "~", o->filename);
+    gtcaca_textlist_append(tl, row);
+  }
+  tl->has_focus = 1;
+
+  for (;;) {
+    int k;
+    gtcaca_redraw();
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    if (k == CACA_KEY_ESCAPE || k == 'q') break;
+    if (k == CACA_KEY_UP)   { gtcaca_textlist_selection_up(tl);   continue; }
+    if (k == CACA_KEY_DOWN) { gtcaca_textlist_selection_down(tl); continue; }
+    if (k == CACA_KEY_RETURN || k == 10 || k == 's') {
+      const pcapng_object_t *o = pcapng_object_at(ex, (int)tl->selected_item);
+      if (o) save_one_object(o);
+      continue;
+    }
+    if (k == 'a') { save_all_objects(ex); continue; }
+    if (tl->private_key_cb) tl->private_key_cb(tl, k, NULL);
+  }
+
+  gtcaca_textlist_clear(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(hint)); free(hint);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tl));   free(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(hdr));  free(hdr);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));  free(win);
+  modal_close_menu();
+  pcapng_object_extractor_free(ex);
+}
+
+static void act_export_http(void *u) { (void)u; act_export_objects(PCAPNG_OBJ_HTTP, "HTTP"); }
+static void act_export_smb(void *u)  { (void)u; act_export_objects(PCAPNG_OBJ_SMB,  "SMB");  }
+
 /* scroll a textview until Esc/q */
 static void modal_scroll_loop(gtcaca_textview_widget_t *tv)
 {
@@ -894,54 +1013,304 @@ static void act_follow_udp(void *u)
   modal_close_menu();
 }
 
-/* ── IO graph (packets per time interval; all vs filtered) ──────────────── */
+/* ── IO Graph (Wireshark-style: multiple graphs, filters, colours, styles) ─ */
+#define IOG_MAX 8
+
+/* Y-axis modes (cf. Wireshark). Field modes aggregate a chosen field's value. */
+enum {
+  IOG_Y_PACKETS = 0, IOG_Y_BYTES, IOG_Y_BITS,
+  IOG_Y_SUM, IOG_Y_COUNT_FRAMES, IOG_Y_COUNT_FIELDS,
+  IOG_Y_MAX, IOG_Y_MIN, IOG_Y_AVG, IOG_Y_NMODES
+};
+#define IOG_Y_ISFIELD(y) ((y) >= IOG_Y_SUM)
+
+typedef struct {
+  int        enabled;
+  char       name[40];
+  char       filter_text[128];
+  cfilter_t *filter;              /* compiled; NULL = match all           */
+  uint8_t    color;
+  int        style;               /* GTCACA_LC_*                          */
+  int        yunit;               /* IOG_Y_*                              */
+  char       yfield[64];          /* field abbrev for the field Y modes   */
+} iog_series_t;
+
+static const double IOG_INTERVALS[] = { 0.001, 0.01, 0.1, 1.0, 10.0, 60.0 };
+#define IOG_NINTERVALS ((int)(sizeof IOG_INTERVALS / sizeof IOG_INTERVALS[0]))
+static const uint8_t IOG_PALETTE[] = {
+  CACA_GREEN, CACA_YELLOW, CACA_LIGHTRED, CACA_LIGHTCYAN,
+  CACA_LIGHTMAGENTA, CACA_WHITE, CACA_LIGHTBLUE, CACA_BROWN };
+#define IOG_NPAL ((int)(sizeof IOG_PALETTE / sizeof IOG_PALETTE[0]))
+
+static int _pal_idx(uint8_t c)
+{ int i; for (i = 0; i < IOG_NPAL; i++) if (IOG_PALETTE[i] == c) return i; return 0; }
+
+static const char *iog_color_name(uint8_t c)
+{
+  switch (c) {
+  case CACA_GREEN: return "Green";   case CACA_YELLOW: return "Yellow";
+  case CACA_LIGHTRED: return "Red";  case CACA_LIGHTCYAN: return "Cyan";
+  case CACA_LIGHTMAGENTA: return "Magenta"; case CACA_WHITE: return "White";
+  case CACA_LIGHTBLUE: return "Blue"; case CACA_BROWN: return "Orange";
+  default: return "?";
+  }
+}
+static const char *iog_style_name(int s)
+{ static const char *n[] = { "Line", "Impulse", "Bar", "Dot" }; return n[s & 3]; }
+
+/* Human description of a series' Y axis, e.g. "Bytes" or "AVG(tcp.window_size)". */
+static void iog_yaxis_desc(const iog_series_t *s, char *out, size_t sz)
+{
+  const char *fld = s->yfield[0] ? s->yfield : "?";
+  switch (s->yunit) {
+  case IOG_Y_PACKETS:      snprintf(out, sz, "Packets"); break;
+  case IOG_Y_BYTES:        snprintf(out, sz, "Bytes");   break;
+  case IOG_Y_BITS:         snprintf(out, sz, "Bits");    break;
+  case IOG_Y_SUM:          snprintf(out, sz, "SUM(%s)", fld); break;
+  case IOG_Y_COUNT_FRAMES: snprintf(out, sz, "COUNT FRAMES(%s)", fld); break;
+  case IOG_Y_COUNT_FIELDS: snprintf(out, sz, "COUNT FIELDS(%s)", fld); break;
+  case IOG_Y_MAX:          snprintf(out, sz, "MAX(%s)", fld); break;
+  case IOG_Y_MIN:          snprintf(out, sz, "MIN(%s)", fld); break;
+  case IOG_Y_AVG:          snprintf(out, sz, "AVG(%s)", fld); break;
+  default:                 snprintf(out, sz, "?"); break;
+  }
+}
+
+/* Collect a field's numeric occurrences from a dissection. */
+static void iog_field_stats(cfield_t *root, const char *abbrev, int *nfields,
+                            int *nnum, double *sum, double *mn, double *mx)
+{
+  cfield_t *out[256];
+  int n = cfield_collect(root, abbrev, out, 256), i, num = 0;
+  double s = 0, lo = 0, hi = 0;
+  for (i = 0; i < n; i++) {
+    double v;
+    if (out[i]->vtype == CV_UINT) v = (double)out[i]->u;
+    else continue;                          /* only numeric fields aggregate */
+    if (num == 0) { lo = hi = v; } else { if (v < lo) lo = v; if (v > hi) hi = v; }
+    s += v; num++;
+  }
+  *nfields = n; *nnum = num; *sum = s; *mn = lo; *mx = hi;
+}
+
+/* Recompute every series' bins over the capture and (re)load the chart + list. */
+static void iog_refresh(gtcaca_linechart_widget_t *lc, gtcaca_textlist_widget_t *tl,
+                        iog_series_t *ser, int nser, int sel,
+                        uint64_t t0, uint64_t span_us, double interval, int log_y)
+{
+  int nb = (int)(span_us / (interval * 1e6)) + 1;
+  double **acc, **cnt;             /* acc = value, cnt = #samples (for AVG) */
+  int s;
+  long i;
+  int need_dissect = 0;
+
+  if (nb < 1) nb = 1; if (nb > 4000) nb = 4000;
+  acc = calloc((size_t)nser, sizeof *acc);
+  cnt = calloc((size_t)nser, sizeof *cnt);
+  for (s = 0; s < nser; s++) { acc[s] = calloc((size_t)nb, sizeof **acc);
+                               cnt[s] = calloc((size_t)nb, sizeof **cnt); }
+  for (s = 0; s < nser; s++)
+    if (ser[s].enabled && (ser[s].filter || IOG_Y_ISFIELD(ser[s].yunit))) need_dissect = 1;
+
+  for (i = 0; i < app.cap.count; i++) {
+    cpkt_t *p = &app.cap.pkts[i];
+    int b = (int)((double)(p->ts_us - t0) / (interval * 1e6));
+    cfield_t *root = NULL;
+    if (b < 0) b = 0; if (b >= nb) b = nb - 1;
+    if (need_dissect) root = dissect_packet(p);
+    for (s = 0; s < nser; s++) {
+      iog_series_t *g = &ser[s];
+      if (!g->enabled) continue;
+      if (g->filter && !(root && filter_eval(g->filter, root))) continue;
+      switch (g->yunit) {
+      case IOG_Y_PACKETS: acc[s][b] += 1.0; break;
+      case IOG_Y_BYTES:   acc[s][b] += (double)p->origlen; break;
+      case IOG_Y_BITS:    acc[s][b] += (double)p->origlen * 8.0; break;
+      default: {          /* field-based modes */
+        int nf, nn; double sum, mn, mx;
+        if (!root || !g->yfield[0]) break;
+        iog_field_stats(root, g->yfield, &nf, &nn, &sum, &mn, &mx);
+        if (g->yunit == IOG_Y_COUNT_FRAMES) { if (nf > 0) acc[s][b] += 1.0; }
+        else if (g->yunit == IOG_Y_COUNT_FIELDS) acc[s][b] += (double)nf;
+        else if (nn > 0) {
+          if (g->yunit == IOG_Y_SUM) acc[s][b] += sum;
+          else if (g->yunit == IOG_Y_AVG) { acc[s][b] += sum; cnt[s][b] += nn; }
+          else if (g->yunit == IOG_Y_MAX) { if (cnt[s][b] == 0 || mx > acc[s][b]) acc[s][b] = mx; cnt[s][b] = 1; }
+          else if (g->yunit == IOG_Y_MIN) { if (cnt[s][b] == 0 || mn < acc[s][b]) acc[s][b] = mn; cnt[s][b] = 1; }
+        }
+        break; }
+      }
+    }
+    if (root) cfield_free(root);
+  }
+
+  /* finalize AVG (value / sample count) */
+  for (s = 0; s < nser; s++)
+    if (ser[s].yunit == IOG_Y_AVG)
+      for (i = 0; i < nb; i++) if (cnt[s][i] > 0) acc[s][i] /= cnt[s][i];
+
+  gtcaca_linechart_clear(lc);
+  gtcaca_linechart_set_log_y(lc, log_y);
+  gtcaca_linechart_set_xspan(lc, (double)span_us / 1e6, "s");
+  for (s = 0; s < nser; s++)
+    if (ser[s].enabled)
+      gtcaca_linechart_add_series_styled(lc, acc[s], nb, ser[s].color, ser[s].style, ser[s].name);
+
+  /* config list rows */
+  gtcaca_textlist_clear(tl);
+  for (s = 0; s < nser; s++) {
+    char row[256], ydesc[80];
+    iog_yaxis_desc(&ser[s], ydesc, sizeof ydesc);
+    snprintf(row, sizeof row, "%s %-13.13s %-8.8s %-8.8s %-18.18s %s",
+             ser[s].enabled ? "[x]" : "[ ]", ser[s].name,
+             iog_color_name(ser[s].color), iog_style_name(ser[s].style),
+             ydesc,
+             ser[s].filter_text[0] ? ser[s].filter_text : "(all packets)");
+    gtcaca_textlist_append(tl, row);
+  }
+  if (sel >= 0 && sel < nser) tl->selected_item = (unsigned)sel;
+
+  for (s = 0; s < nser; s++) { free(acc[s]); free(cnt[s]); }
+  free(acc); free(cnt);
+}
+
 static void act_io_graph(void *u)
 {
   gtcaca_window_widget_t *win;
   gtcaca_linechart_widget_t *lc;
-  int w, h, nb, b;
-  double *all, *flt;
-  uint64_t t0, t1, span;
+  gtcaca_textlist_widget_t *tl;
+  gtcaca_label_widget_t *hdr, *help;
+  iog_series_t ser[IOG_MAX];
+  int nser = 0, w, h, ch, iv = 3, log_y = 0, s;
+  uint64_t t0, t1, span_us;
   long i;
   char title[160];
   caca_event_t ev;
   (void)u;
 
   if (app.cap.count == 0) { gtcaca_dialog_message("IO Graph", "No capture loaded."); return; }
-  win = modal_window("IO Graph", &w, &h);
-  lc  = gtcaca_linechart_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 2);
-  nb  = w - 12; if (nb < 10) nb = 10; if (nb > 240) nb = 240;
-  all = calloc((size_t)nb, sizeof *all);
-  flt = calloc((size_t)nb, sizeof *flt);
 
   t0 = t1 = app.cap.pkts[0].ts_us;
   for (i = 0; i < app.cap.count; i++) {
     uint64_t t = app.cap.pkts[i].ts_us;
     if (t > t1) t1 = t; if (t < t0) t0 = t;
   }
-  span = (t1 > t0) ? (t1 - t0) : 1;
-  for (i = 0; i < app.cap.count && all && flt; i++) {
-    cpkt_t *p = &app.cap.pkts[i];
-    b = (int)((double)(p->ts_us - t0) / (double)span * (nb - 1));
-    if (b < 0) b = 0; if (b >= nb) b = nb - 1;
-    all[b] += 1.0;
-    if (app.filter_text[0] && app.filter) {
-      cfield_t *r = dissect_packet(p);
-      if (filter_eval(app.filter, r)) flt[b] += 1.0;
-      cfield_free(r);
-    }
-  }
-  if (all) gtcaca_linechart_add_series(lc, all, nb, CACA_GREEN);
-  if (flt && app.filter_text[0]) gtcaca_linechart_add_series(lc, flt, nb, CACA_YELLOW);
-  snprintf(title, sizeof title, "IO Graph  green=all (%ld pkts)%s",
-           app.cap.count, app.filter_text[0] ? "   yellow=filter match" : "");
-  gtcaca_linechart_set_title(lc, title);
-  free(all); free(flt);          /* add_series copied the data */
+  span_us = (t1 > t0) ? (t1 - t0) : 1;
+  /* pick a default interval aiming for ~100 bins */
+  { double want = (double)span_us / 1e6 / 100.0; int best = 3; double bd = 1e18;
+    for (s = 0; s < IOG_NINTERVALS; s++) { double d = IOG_INTERVALS[s] > want ?
+        IOG_INTERVALS[s] - want : want - IOG_INTERVALS[s];
+      if (d < bd) { bd = d; best = s; } }
+    iv = best; }
 
-  lc->has_focus = 1;
-  for (;;) { gtcaca_redraw(); if (caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) break; }
-  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(lc)); gtcaca_linechart_free(lc);
-  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
+  /* default graphs: all packets, plus the active display filter if any */
+  memset(ser, 0, sizeof ser);
+  ser[0].enabled = 1; snprintf(ser[0].name, sizeof ser[0].name, "All packets");
+  ser[0].filter = NULL; ser[0].color = IOG_PALETTE[0]; ser[0].style = GTCACA_LC_LINE; ser[0].yunit = 0;
+  nser = 1;
+  if (app.filter_text[0] && app.filter) {
+    char err[128];
+    ser[1].enabled = 1;
+    snprintf(ser[1].name, sizeof ser[1].name, "Filter");
+    snprintf(ser[1].filter_text, sizeof ser[1].filter_text, "%s", app.filter_text);
+    ser[1].filter = filter_compile(app.filter_text, err, sizeof err);
+    ser[1].color = IOG_PALETTE[1]; ser[1].style = GTCACA_LC_IMPULSE; ser[1].yunit = 0;
+    nser = 2;
+  }
+
+  win = modal_window("IO Graph", &w, &h);
+  ch  = (h - 4) * 55 / 100; if (ch < 6) ch = 6; if (ch > h - 8) ch = h - 8;
+  lc  = gtcaca_linechart_new(GTCACA_WIDGET(win), 1, 1, w - 2, ch);
+  hdr = gtcaca_label_new(GTCACA_WIDGET(win),
+          "  Graph          Color     Style    Y-Axis   Display filter", 2, ch + 1);
+  hdr->width = w - 4;
+  tl  = gtcaca_textlist_new(GTCACA_WIDGET(win), 2, ch + 2);
+  gtcaca_textlist_widget_set_view_size(tl, h - ch - 5 > 1 ? h - ch - 5 : 1);
+  help = gtcaca_label_new(GTCACA_WIDGET(win),
+          "space on/off  f filter  F field  n name  c color  t style  y axis  i interval  L log  a add  d del  Esc", 2, h - 2);
+  help->width = w - 4;
+
+  snprintf(title, sizeof title, "IO Graph  \xe2\x80\x94  interval %g s%s", IOG_INTERVALS[iv], log_y ? "  log-Y" : "");
+  gtcaca_linechart_set_title(lc, title);
+  iog_refresh(lc, tl, ser, nser, 0, t0, span_us, IOG_INTERVALS[iv], log_y);
+  tl->has_focus = 1;
+
+  for (;;) {
+    int k, sel;
+    gtcaca_redraw();
+    if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
+    k = caca_get_event_key_ch(&ev);
+    sel = (int)tl->selected_item;
+    if (sel < 0) sel = 0; if (sel >= nser) sel = nser - 1;
+
+    if (k == CACA_KEY_ESCAPE || k == 'q') break;
+    else if (k == CACA_KEY_UP)   { gtcaca_textlist_selection_up(tl);   continue; }
+    else if (k == CACA_KEY_DOWN) { gtcaca_textlist_selection_down(tl); continue; }
+    else if (k == ' ')  ser[sel].enabled = !ser[sel].enabled;
+    else if (k == 'c')  ser[sel].color = IOG_PALETTE[(_pal_idx(ser[sel].color) + 1) % IOG_NPAL];
+    else if (k == 't')  ser[sel].style = (ser[sel].style + 1) & 3;
+    else if (k == 'y') {
+      ser[sel].yunit = (ser[sel].yunit + 1) % IOG_Y_NMODES;
+      /* entering a field mode with no field yet → prompt for one */
+      if (IOG_Y_ISFIELD(ser[sel].yunit) && !ser[sel].yfield[0]) {
+        char fld[64] = "";
+        if (prompt_line("Y field (e.g. tcp.window_size):  ", fld, sizeof fld) && fld[0])
+          snprintf(ser[sel].yfield, sizeof ser[sel].yfield, "%s", fld);
+      }
+    }
+    else if (k == 'F') {
+      char fld[64];
+      snprintf(fld, sizeof fld, "%s", ser[sel].yfield);
+      if (prompt_line("Y field (e.g. tcp.window_size):  ", fld, sizeof fld))
+        snprintf(ser[sel].yfield, sizeof ser[sel].yfield, "%s", fld);
+    }
+    else if (k == 'i')  iv = (iv + 1) % IOG_NINTERVALS;
+    else if (k == 'L')  log_y = !log_y;
+    else if (k == 'n') {
+      char nm[40];
+      snprintf(nm, sizeof nm, "%s", ser[sel].name);
+      if (prompt_line("Graph name:  ", nm, sizeof nm)) snprintf(ser[sel].name, sizeof ser[sel].name, "%s", nm);
+    }
+    else if (k == 'f') {
+      char fx[128], err[128];
+      snprintf(fx, sizeof fx, "%s", ser[sel].filter_text);
+      if (prompt_line("Display filter:  ", fx, sizeof fx)) {
+        cfilter_t *nf = fx[0] ? filter_compile(fx, err, sizeof err) : NULL;
+        if (fx[0] && !nf) gtcaca_dialog_message("Filter error", err[0] ? err : "invalid filter");
+        else {
+          if (ser[sel].filter) filter_free(ser[sel].filter);
+          ser[sel].filter = nf;
+          snprintf(ser[sel].filter_text, sizeof ser[sel].filter_text, "%s", fx);
+        }
+      }
+    }
+    else if (k == 'a' && nser < IOG_MAX) {
+      memset(&ser[nser], 0, sizeof ser[nser]);
+      ser[nser].enabled = 1;
+      snprintf(ser[nser].name, sizeof ser[nser].name, "Graph %d", nser + 1);
+      ser[nser].color = IOG_PALETTE[nser % IOG_NPAL];
+      ser[nser].style = GTCACA_LC_LINE; ser[nser].yunit = 0;
+      sel = nser; nser++;
+    }
+    else if (k == 'd' && nser > 1) {
+      if (ser[sel].filter) filter_free(ser[sel].filter);
+      for (s = sel; s < nser - 1; s++) ser[s] = ser[s + 1];
+      nser--; if (sel >= nser) sel = nser - 1;
+    }
+    else { if (tl->private_key_cb) tl->private_key_cb(tl, k, NULL); continue; }
+
+    snprintf(title, sizeof title, "IO Graph  \xe2\x80\x94  interval %g s%s", IOG_INTERVALS[iv], log_y ? "  log-Y" : "");
+    gtcaca_linechart_set_title(lc, title);
+    iog_refresh(lc, tl, ser, nser, sel, t0, span_us, IOG_INTERVALS[iv], log_y);
+  }
+
+  for (s = 0; s < nser; s++) if (ser[s].filter) filter_free(ser[s].filter);
+  gtcaca_textlist_clear(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(help)); free(help);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tl));   free(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(hdr));  free(hdr);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(lc));   gtcaca_linechart_free(lc);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));  free(win);
   modal_close_menu();
 }
 
@@ -1517,6 +1886,9 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Reload",               "",    act_reload,    NULL);
   gtcaca_menu_add_separator(app.menu, e);
   gtcaca_menu_add_item(app.menu, e, "Save\xe2\x80\xa6",     "^S",  act_save,      NULL);
+  gtcaca_menu_add_separator(app.menu, e);
+  gtcaca_menu_add_item(app.menu, e, "Export HTTP Objects\xe2\x80\xa6", "", act_export_http, NULL);
+  gtcaca_menu_add_item(app.menu, e, "Export SMB Objects\xe2\x80\xa6",  "", act_export_smb,  NULL);
   gtcaca_menu_add_separator(app.menu, e);
   gtcaca_menu_add_item(app.menu, e, "Quit",                 "^Q",  act_quit,      NULL);
 
