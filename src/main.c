@@ -966,16 +966,29 @@ static void act_follow_tcp(void *u)
   ctx = pcapng_tcp_reasm_new();
   fc.tv = tv; fc.cip = l4.sip; fc.cport = l4.sport; fc.width = w - 2; fc.any = 0;
 
-  for (i = 0; i < app.cap.count; i++) {
-    caracal_l4_t a;
-    cpkt_t *p = &app.cap.pkts[i];
-    if (!caracal_locate_l4(p, &a) || a.proto != 6 || !same_flow(&a, &l4)) continue;
-    pcapng_tcp_reasm_add(ctx, a.sip, a.dip, a.sport, a.dport, a.seq, a.flags,
-                         a.paylen > 0 ? p->data + a.payoff : NULL,
-                         (size_t)(a.paylen > 0 ? a.paylen : 0), follow_tcp_cb, &fc);
+  { long nseg = 0;
+    for (i = 0; i < app.cap.count; i++) {
+      caracal_l4_t a;
+      cpkt_t *p = &app.cap.pkts[i];
+      if (!caracal_locate_l4(p, &a) || a.proto != 6 || !same_flow(&a, &l4)) continue;
+      nseg++;
+      pcapng_tcp_reasm_add(ctx, a.sip, a.dip, a.sport, a.dport, a.seq, a.flags,
+                           a.paylen > 0 ? p->data + a.payoff : NULL,
+                           (size_t)(a.paylen > 0 ? a.paylen : 0), follow_tcp_cb, &fc);
+    }
+    pcapng_tcp_reasm_free(ctx);
+    if (!fc.any) {
+      char msg[256];
+      snprintf(msg, sizeof msg,
+        "Port %u \xe2\x86\x94 %u: %ld segment(s) in this stream, but none carry payload.",
+        l4.sport, l4.dport, nseg);
+      gtcaca_textview_append(tv, msg);
+      gtcaca_textview_append(tv, "");
+      gtcaca_textview_append(tv, "This TCP stream has only ACK/control packets (Len=0) \xe2\x80\x94");
+      gtcaca_textview_append(tv, "the data segments were not captured, or there is no data.");
+      gtcaca_textview_append(tv, "Follow a packet whose Len>0 (e.g. an Application Data packet).");
+    }
   }
-  pcapng_tcp_reasm_free(ctx);
-  if (!fc.any) gtcaca_textview_append(tv, "(no stream payload)");
   modal_scroll_loop(tv);
   tv_destroy(tv);
   CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
