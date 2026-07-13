@@ -52,17 +52,22 @@ cmake .. -DGTCACA_ROOT=/path/to/gtcaca -DLIBPCAPNG_ROOT=/path/to/libpcapng
 | Key | Action |
 |-----|--------|
 | `F2` / `^O` | Open a capture file |
-| `F10` | Open the menu bar (File / Analyze / Help) |
+| `F9` / `F10` | Open the menu bar (File / Analyze / Help) |
 | `/` | Jump to the display-filter box |
-| `Tab` | Cycle focus: filter → packet table → detail tree |
+| `Tab` | Cycle focus: filter → packet table → detail tree → bytes → **menu bar** |
 | `↑ ↓ PgUp PgDn Home End` | Navigate the focused pane |
 | `← → / Space / Enter` | Collapse/expand a detail-tree node |
 | `^F` | Find packet (text, or `hex:DE AD BE EF`) |
 | `n` / `N` | Jump to next / previous find match |
 | `q` / `^Q` | Quit |
 
+**Reaching the menu.** `F9` and `F10` both open the menu bar, and `Tab` also
+cycles into it — because GNOME Terminal, xterm and others grab `F10` for their
+own menubar and carcal never sees the key. Use `F9` (as Midnight Commander does,
+for the same reason) or just `Tab` around to it; `Esc` or `Tab` leaves it again.
+
 The lower area is split into the **detail tree** (left) and a Wireshark-style
-**hex byte pane** (right) for the selected packet. Menus (F10):
+**hex byte pane** (right) for the selected packet. Menus:
 
 - **Edit** — Find Packet / Find Next / Find Previous.
 - **Analyze** — Follow TCP Stream, Follow UDP Stream, Decode As…, Decoders…
@@ -137,6 +142,22 @@ grammar adds `layer`, `scope`, `when`, `string … until`, `info` and `rule` —
 | --- | --- | --- |
 | `protos/tftp.posa` | TFTP (RFC 1350), dispatched by opcode | `udp.port == 69` |
 | `protos/rdp.posa` | RDP over TPKT / X.224 COTP — connection request/confirm, `mstshash` cookie and the negotiation request (requested security protocols) | `tcp.port == 3389` |
+
+## Command line
+
+`carcal --help` lists everything. The short version:
+
+```sh
+carcal capture.pcapng            # open a file in the UI
+carcal -i eth0                   # start capturing on eth0 right away
+carcal -i eth0 -f "tcp.port == 443"   # …with a capture filter
+carcal --dump capture.pcapng "dns"    # headless: dissect to stdout and exit
+```
+
+`-i` goes straight into a live capture, exactly as **Capture ▸ Start…** would —
+so it needs the same privileges (root, or `CAP_NET_RAW` on Linux) and is
+unavailable on Windows. `-f` is its capture filter, in display-filter syntax.
+`-i` and a capture file are mutually exclusive.
 
 ## Command-line scripting (LuaJIT)
 

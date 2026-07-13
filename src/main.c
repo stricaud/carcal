@@ -138,7 +138,10 @@ static void add_port_rule(const char *transport, unsigned port, const char *prot
   rules_add(cond, proto, NULL, 0);
 }
 
-enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE, FOCUS_HEX, FOCUS_COUNT };
+/* Tab cycles through these in order. The menu is one of them, so the whole UI is
+   reachable from the keyboard without F10 — which GNOME Terminal, xterm and
+   friends swallow for their own menubar before carcal ever sees it. */
+enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE, FOCUS_HEX, FOCUS_MENU, FOCUS_COUNT };
 
 typedef struct {
   capture_t cap;
@@ -348,13 +351,14 @@ static void refresh_status(void)
   char s[320];
   const char *focusname = app.focus == FOCUS_FILTER ? "filter"
                         : app.focus == FOCUS_TABLE  ? "table"
-                        : app.focus == FOCUS_TREE   ? "tree" : "hex";
+                        : app.focus == FOCUS_TREE   ? "tree"
+                        : app.focus == FOCUS_MENU   ? "menu" : "hex";
   if (app.cap.count == 0 && !app.capturing) {
-    snprintf(s, sizeof s, " No capture  |  F2 Open  F10 Menu (Capture ▸ Start)  Tab switch  ^Q quit");
+    snprintf(s, sizeof s, " No capture  |  F2 Open  F9 Menu (Capture ▸ Start)  Tab switch  ^Q quit");
   } else {
     long sel = app.table ? gtcaca_table_selected_row(app.table) : 0;
     snprintf(s, sizeof s,
-      " %s%s  |  %ld/%ld pkts shown  |  sel %ld  |  [%s]  |  / filter  F10 menu  ^Q quit",
+      " %s%s  |  %ld/%ld pkts shown  |  sel %ld  |  [%s]  |  / filter  F9 menu  ^Q quit",
       app.capturing ? "● CAPTURING " : "",
       app.cap.path[0] ? app.cap.path : "(none)",
       app.nview, app.cap.count, app.nview ? sel + 1 : 0, focusname);
@@ -2637,6 +2641,36 @@ static void sync_focus(void)
   if (app.table)  app.table->has_focus  = (app.focus == FOCUS_TABLE);
   if (app.tree)   app.tree->has_focus   = (app.focus == FOCUS_TREE);
   if (app.hex)    app.hex->has_focus    = (app.focus == FOCUS_HEX);
+  if (app.menu) {
+    app.menu->has_focus = (app.focus == FOCUS_MENU);
+    /* Leaving the menu must also close any dropdown it left open. */
+    if (app.focus != FOCUS_MENU) app.menu->is_open = 0;
+  }
+}
+
+/* Move the keyboard focus one step around the Tab cycle, skipping panes that
+   are currently hidden (the tree and hex panes are toggleable). */
+static void focus_advance(int dir)
+{
+  int i;
+  for (i = 0; i < FOCUS_COUNT; i++) {
+    app.focus = (app.focus + dir + FOCUS_COUNT) % FOCUS_COUNT;
+    if (app.focus == FOCUS_TREE && !app.show_tree)              continue;
+    if (app.focus == FOCUS_HEX  && !(app.show_hex && app.hex))  continue;
+    break;
+  }
+  if (app.focus == FOCUS_MENU && app.menu) app.menu->active_entry = 0;
+  sync_focus();
+}
+
+/* Give the menu bar the keyboard, from F9/F10 or the menu's mouse click. */
+static void focus_menu(void)
+{
+  if (!app.menu) return;
+  app.focus = FOCUS_MENU;
+  app.menu->active_entry = 0;
+  app.menu->is_open = 0;
+  sync_focus();
 }
 
 static void redraw(void)
@@ -2783,8 +2817,8 @@ static int lua_cli(int argc, char **argv)
     else if (argv[i][0] != '-' && !capf) capf = argv[i];
   }
 
-  if (!script) { fprintf(stderr, "carcal: -s <script.lua> is required\n"); return 2; }
-  if (!capf)   { fprintf(stderr, "carcal: -r <capture> is required\n"); return 2; }
+  if (!script) { fprintf(stderr, "carcal: -s <script.lua> is required (see carcal --help)\n"); return 2; }
+  if (!capf)   { fprintf(stderr, "carcal: -r <capture> is required (see carcal --help)\n"); return 2; }
 
   load_decoders();
   for (i = 0; i < nposas; i++) {
@@ -2818,6 +2852,67 @@ static int has_arg(int argc, char **argv, const char *a, const char *b)
   return 0;
 }
 
+static void usage(FILE *out)
+{
+  fprintf(out,
+"carcal — a terminal packet analyzer (a tiny Wireshark for the TUI)\n"
+"\n"
+"Usage:\n"
+"  carcal [FILE]                       open a capture in the interactive UI\n"
+"  carcal -i INTERFACE                 start capturing live, right away\n"
+"  carcal --dump FILE [FILTER]         dissect to stdout and exit (no UI)\n"
+"  carcal -s SCRIPT.lua -r FILE [...]  run a Lua script over a capture\n"
+"  carcal --help                       this help\n"
+"\n"
+"FILE is a .pcap or .pcapng capture. With no FILE, carcal starts empty —\n"
+"open one with F2, or capture live from Capture ▸ Start.\n"
+"\n"
+"Interactive:\n"
+"  -i INTERFACE        capture from INTERFACE immediately (e.g. -i eth0).\n"
+"                      Needs privileges: run as root, or on Linux grant the\n"
+"                      binary CAP_NET_RAW. Not available on Windows.\n"
+"                      Interface names are listed by Capture ▸ Start…\n"
+"  -f FILTER           capture filter to apply while capturing, in display-filter\n"
+"                      syntax, e.g. carcal -i eth0 -f \"tcp.port == 443\"\n"
+"                      (only with -i; it is applied as packets arrive)\n"
+"  --graph ENTITY      open the entity graph focused on ENTITY (an IP, port, …)\n"
+"\n"
+"Headless dump:\n"
+"  --dump FILE [FILTER]\n"
+"                      print the packet list and the detail tree of the first\n"
+"                      match. FILTER is a display filter, e.g. \"tcp.port == 443\".\n"
+"\n"
+"Lua scripting (all of these need -s):\n"
+"  -s, --script FILE   the Lua script to run                        (required)\n"
+"  -r FILE             the capture to read                          (required)\n"
+"  -f FILTER           only hand the script packets matching this display filter\n"
+"  -X \"<udp|tcp> PORT PROTO\"\n"
+"                      decode PORT as a .posa protocol, e.g. -X \"tcp 3389 TPKT\"\n"
+"                      (repeatable, up to 32)\n"
+"  -p FILE.posa        load an extra .posa decoder (repeatable, up to 32)\n"
+"\n"
+"Keys (interactive):\n"
+"  F9 / F10            open the menu bar — use F9 if your terminal eats F10\n"
+"  Tab                 move between filter, packet list, detail tree, bytes, menu\n"
+"  /                   jump to the display-filter box       Enter applies it\n"
+"  F2, ^O              open a capture            ^S  save        ^F  find\n"
+"  n / N               next / previous find match\n"
+"  ^Q, q               quit\n"
+"\n"
+"Environment:\n"
+"  CARCAL_PROTOS_DIR   directory of .posa decoders + decoders.rules\n"
+"                      (default: the protos/ shipped alongside carcal)\n"
+"  CARCAL_GRAMMARS_DIR directory of editor syntax grammars\n"
+"  CARCAL_BIND         port binding applied in -s mode, e.g. \"udp 69 TFTP\"\n"
+"  CARCAL_SAVE         in -s mode, write the matched packets to this pcapng\n"
+"\n"
+"A .posa decoder dropped into the protos/ directory is loaded at startup; if it\n"
+"declares a `rule <udp|tcp>.port == N => Proto` line it binds itself, with no\n"
+"rebuild. See the bundled protos/tftp.posa and protos/rdp.posa.\n"
+"\n"
+"https://github.com/stricaud/carcal\n");
+}
+
 /* ───────────────────────── main ───────────────────────────────────────── */
 int main(int argc, char **argv)
 {
@@ -2826,16 +2921,49 @@ int main(int argc, char **argv)
   int W, H;
   int int_w;
   int widths[7];
+  const char *capfile = NULL, *graph_entity = NULL;
+  const char *iface = NULL, *cfilter = NULL;
+  int ai;
 
   app.detail_for = -1;
 
+  /* Before anything touches the display, so --help works with no TTY / piped. */
+  if (has_arg(argc, argv, "-h", "--help")) { usage(stdout); return 0; }
+
   /* Headless mode for scripting/testing: carcal --dump <file> [filter] */
-  if (argc >= 3 && strcmp(argv[1], "--dump") == 0)
+  if (argc >= 2 && strcmp(argv[1], "--dump") == 0) {
+    if (argc < 3) {
+      fprintf(stderr, "carcal: --dump needs a capture file\n\n");
+      usage(stderr);
+      return 2;
+    }
     return dump_mode(argv[2], argc > 3 ? argv[3] : NULL);
+  }
 
   /* Lua scripting mode (generalized MQS): carcal -s script.lua -r cap … */
   if (has_arg(argc, argv, "-s", "--script"))
     return lua_cli(argc, argv);
+
+  /* Interactive arguments, parsed before the display is opened so a usage error
+     can still reach stderr rather than being painted over by the TUI. */
+  for (ai = 1; ai < argc; ai++) {
+    if      (!strcmp(argv[ai], "-i")      && ai + 1 < argc) iface        = argv[++ai];
+    else if (!strcmp(argv[ai], "-f")      && ai + 1 < argc) cfilter      = argv[++ai];
+    else if (!strcmp(argv[ai], "--graph") && ai + 1 < argc) graph_entity = argv[++ai];
+    else if (argv[ai][0] != '-' && !capfile) capfile = argv[ai];
+  }
+  if (iface && capfile) {
+    fprintf(stderr, "carcal: -i %s captures live — it cannot be combined with "
+                    "a capture file (%s)\n\n", iface, capfile);
+    usage(stderr);
+    return 2;
+  }
+  if (cfilter && !iface) {
+    fprintf(stderr, "carcal: -f is the capture filter for -i; to filter a file, "
+                    "open it and type the filter in the UI (or use --dump FILE FILTER)\n\n");
+    usage(stderr);
+    return 2;
+  }
 
   if (gtcaca_init(&argc, &argv) < 0) {
     fprintf(stderr, "carcal: cannot initialize display\n");
@@ -2905,17 +3033,16 @@ int main(int argc, char **argv)
 
   /* Open a file passed on the command line. Optional: --graph <ip|port> opens
      the Entity Explorer rooted at that entity once the capture is loaded. */
-  {
-    const char *capfile = NULL, *graph_entity = NULL;
-    int ai;
-    for (ai = 1; ai < argc; ai++) {
-      if (!strcmp(argv[ai], "--graph") && ai + 1 < argc) graph_entity = argv[++ai];
-      else if (argv[ai][0] != '-' && !capfile) capfile = argv[ai];
-    }
-    if (capfile) load_capture(capfile);
-    else app.filter = filter_compile("", NULL, 0);
-    g_pending_graph = graph_entity;
-  }
+  if (capfile) load_capture(capfile);
+  else         app.filter = filter_compile("", NULL, 0);
+
+  /* -i <interface>: go straight to a live capture, as Capture ▸ Start… would.
+     On failure it has already put up a dialog (no permission, no such device,
+     unsupported platform) — carry on with an empty UI rather than exiting, so
+     the user can still open a file. */
+  if (iface) start_capture(iface, cfilter);
+
+  g_pending_graph = graph_entity;
 
   app.focus = FOCUS_TABLE;
 
@@ -2980,25 +3107,25 @@ int main(int argc, char **argv)
 
     /* menu owns input while open */
     if (app.menu->has_focus) {
-      if (key == CACA_KEY_ESCAPE) { app.menu->has_focus = 0; app.menu->is_open = 0; }
+      /* Tab keeps walking the cycle instead of being swallowed by the menu, so
+         you can always Tab back out to the panes. Esc leaves it too. */
+      if      (key == '\t')            focus_advance(+1);
+      else if (key == CACA_KEY_ESCAPE) { app.focus = FOCUS_TABLE; sync_focus(); }
       else gtcaca_menu_handle_key(app.menu, key);
       redraw();
       continue;
     }
 
     /* global keys */
-    if (key == CACA_KEY_F10) { app.menu->has_focus = 1; app.menu->active_entry = 0; app.menu->is_open = 0; redraw(); continue; }
+    /* F9 as well as F10: GNOME Terminal, xterm and others intercept F10 for
+       their own menubar, so the app never receives it (this is why mc uses F9). */
+    if (key == CACA_KEY_F9 || key == CACA_KEY_F10) { focus_menu(); redraw(); continue; }
     if (key == CACA_KEY_F2)  { act_open(NULL); redraw(); continue; }
     if (key == CTRL('q'))    { if (confirm_quit()) break; redraw(); continue; }
     if (key == CTRL('o'))    { act_open(NULL); redraw(); continue; }
     if (key == CTRL('s'))    { act_save(NULL); redraw(); continue; }
     if (key == CTRL('f'))    { act_find(NULL); redraw(); continue; }
-    if (key == '\t') {
-      app.focus = (app.focus + 1) % FOCUS_COUNT;
-      if (app.focus == FOCUS_HEX && !app.hex) app.focus = FOCUS_FILTER;
-      redraw();
-      continue;
-    }
+    if (key == '\t') { focus_advance(+1); redraw(); continue; }
 
     if (app.focus == FOCUS_FILTER) {
       if (key == CACA_KEY_RETURN || key == 10) {
