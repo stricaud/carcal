@@ -140,55 +140,46 @@ int       caracal_locate_l4(const cpkt_t *pkt, caracal_l4_t *out);
 #define LINKTYPE_IPV4      228
 #define LINKTYPE_IPV6      229
 
-/* ── posa.c — user-defined protocols ────────────────────────────────────── */
-typedef enum {
-  PT_U8, PT_U16, PT_U32, PT_U64,
-  PT_LE16, PT_LE32, PT_LE64,
-  PT_MAC, PT_IP4, PT_CSTRING, PT_PAYLOAD,
-  PT_BYTES_FIXED,   /* bytes<N>        */
-  PT_BYTES_REF      /* bytes[lenfield] */
-} posa_ftype_t;
+/* ── posa — user-defined protocols (engine lives in libpcapng core) ──────── */
+#include <libpcapng/posa.h>
 
-#define POSA_NAME_MAX   64
-#define POSA_MAX_FLDS   64
-#define POSA_MAX_ENUMS  32
+/* Compatibility aliases: caracal's older posa_* names map onto the libpcapng
+   engine, so existing call sites (dissect.c, lua_run.c, the decoders UI) keep
+   working while there is a single engine. */
+typedef pcapng_posa_ftype_t posa_ftype_t;
+typedef pcapng_posa_enum_t   posa_enum_t;
+typedef pcapng_posa_fld_t    posa_fld_t;
+typedef pcapng_posa_proto_t  posa_proto_t;
 
-typedef struct { char name[POSA_NAME_MAX]; uint64_t val; } posa_enum_t;
+#define POSA_NAME_MAX   PCAPNG_POSA_NAME_MAX
+#define POSA_MAX_FLDS   PCAPNG_POSA_MAX_FLDS
+#define POSA_MAX_ENUMS  PCAPNG_POSA_MAX_ENUMS
 
-typedef struct {
-  char         name[POSA_NAME_MAX];
-  posa_ftype_t type;
-  uint64_t     defnum;
-  size_t       nbytes;            /* PT_BYTES_FIXED                          */
-  char         lenfield[POSA_NAME_MAX]; /* PT_BYTES_REF                      */
-  posa_enum_t  enums[POSA_MAX_ENUMS];
-  int          nenums;
-} posa_fld_t;
+#define PT_U8    PCAPNG_POSA_U8
+#define PT_U16   PCAPNG_POSA_U16
+#define PT_U32   PCAPNG_POSA_U32
+#define PT_U64   PCAPNG_POSA_U64
+#define PT_LE16  PCAPNG_POSA_LE16
+#define PT_LE32  PCAPNG_POSA_LE32
+#define PT_LE64  PCAPNG_POSA_LE64
+#define PT_MAC   PCAPNG_POSA_MAC
+#define PT_IP4   PCAPNG_POSA_IP4
+#define PT_CSTRING PCAPNG_POSA_CSTRING
+#define PT_PAYLOAD PCAPNG_POSA_PAYLOAD
+#define PT_BYTES_FIXED PCAPNG_POSA_BYTES_FIXED
+#define PT_BYTES_REF   PCAPNG_POSA_BYTES_REF
 
-typedef struct {
-  char        name[POSA_NAME_MAX];
-  char        parent[POSA_NAME_MAX];   /* Object<parent>, "" / "main" if top */
-  posa_fld_t  flds[POSA_MAX_FLDS];
-  int         nflds;
-} posa_proto_t;
+#define posa_load_file  pcapng_posa_load_file
+#define posa_load_dir   pcapng_posa_load_dir
+#define posa_count      pcapng_posa_count
+#define posa_at         pcapng_posa_at
+#define posa_find       pcapng_posa_find
+#define posa_to_text    pcapng_posa_to_text
+#define posa_resolve    pcapng_posa_resolve
 
-/* Parse a .posa file / directory; returns #protocols added or -1. */
-int  posa_load_file(const char *path, char *errbuf, size_t errlen);
-int  posa_load_dir(const char *dir);
-int  posa_count(void);
-const posa_proto_t *posa_at(int index);
-const posa_proto_t *posa_find(const char *name);
-/* Bind a transport port to a posa protocol for "Decode As". proto NULL clears. */
-void posa_bind_udp(uint16_t port, const char *proto_name);
-void posa_bind_tcp(uint16_t port, const char *proto_name);
-const char *posa_bound_udp(uint16_t port); /* NULL if none */
-const char *posa_bound_tcp(uint16_t port);
-/* Dissect `data` as the named posa protocol, attaching a subtree to `parent`.
-   Returns bytes consumed, 0 if it could not (unknown proto / no data). */
+/* caracal-side wrapper: dissect with the libpcapng posa engine and convert the
+   resulting pcapng_field_t subtree into caracal's cfield tree (dissect.c). */
 int  posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent, int abs_off);
-/* Resolve a name to a concrete protocol, or — if it names an Object<parent>
-   group — the sub-protocol whose first field matches `data`. NULL if neither. */
-const posa_proto_t *posa_resolve(const char *name, const uint8_t *data, int len);
 
 /* ── filter.c — display filter ──────────────────────────────────────────── */
 typedef struct cfilter cfilter_t;
@@ -209,6 +200,9 @@ void rules_load_defaults(void);
 const char *rules_match(cfield_t *root);   /* decoder name for a dissection, or NULL */
 int  rules_count(void);
 int  rules_get(int i, char *expr, size_t elen, char *proto, size_t plen);
+int  rules_set(int i, const char *expr, const char *proto, char *errbuf, size_t errlen);
+int  rules_remove(int i);
+int  rules_save_file(const char *path);   /* persist rules; returns 0 on success */
 void rules_clear(void);
 
 /* TCP stream reassembly now lives in libpcapng (pcapng_tcp_reasm_*,

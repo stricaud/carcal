@@ -51,6 +51,19 @@ static void copy_children(cfield_t *dst, const pcapng_field_t *src)
   }
 }
 
+/* caracal-side posa: run the libpcapng posa engine into a temporary
+   pcapng_field_t subtree, then convert it into caracal's cfield tree. */
+int posa_dissect(const char *proto, const uint8_t *data, int len, cfield_t *parent, int abs_off)
+{
+  pcapng_field_t tmp, *c, *n;
+  int used;
+  memset(&tmp, 0, sizeof tmp);
+  used = pcapng_posa_dissect(proto, data, len, &tmp, abs_off, NULL, 0);
+  copy_children(parent, &tmp);
+  for (c = tmp.children; c; c = n) { n = c->next; c->next = NULL; pcapng_field_free(c); }
+  return used;
+}
+
 /* Remove top-level generic "data" layers (posa replaces them for bound ports). */
 static void remove_data_layers(cfield_t *root)
 {

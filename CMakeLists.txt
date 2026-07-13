@@ -86,7 +86,6 @@ add_executable(caracal
   src/main.c
   src/source.c
   src/dissect.c
-  src/posa.c
   src/filter.c
   src/field.c
   src/rules.c
@@ -115,11 +114,16 @@ target_link_libraries(caracal PRIVATE
 # Older LuaJIT-on-macOS guidance asks for -pagezero_size/-image_base, but those
 # are x86_64-only and ignored under arm64 PIE, so we omit them.
 
-# Ship the sample protocol definitions next to the binary so caracal can load
-# them at startup (CARACAL_PROTOS_DIR) without an install step.
+# Compiled-in data directories. Default to the in-tree copies so caracal runs
+# from the build tree without an install step; a package build (e.g. Homebrew)
+# overrides these to the install prefix, e.g.
+#   -DCARACAL_DATA_PROTOS=<prefix>/share/caracal/protos
+# (the CARACAL_PROTOS_DIR / CARACAL_GRAMMARS_DIR env vars still win at runtime).
+set(CARACAL_DATA_PROTOS   "${CMAKE_CURRENT_SOURCE_DIR}/protos"   CACHE PATH "compiled-in protos dir")
+set(CARACAL_DATA_GRAMMARS "${CMAKE_CURRENT_SOURCE_DIR}/grammars" CACHE PATH "compiled-in grammars dir")
 target_compile_definitions(caracal PRIVATE
-  CARACAL_PROTOS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protos"
-  CARACAL_GRAMMARS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/grammars")
+  CARACAL_PROTOS_DIR="${CARACAL_DATA_PROTOS}"
+  CARACAL_GRAMMARS_DIR="${CARACAL_DATA_GRAMMARS}")
 
 install(TARGETS caracal RUNTIME DESTINATION bin)
 install(DIRECTORY protos/ DESTINATION share/caracal/protos FILES_MATCHING PATTERN "*.posa")

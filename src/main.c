@@ -80,6 +80,17 @@ static void load_decoders(void)
   rules_load_file(rp, NULL, 0);   /* optional user rules (protos/decoders.rules) */
 }
 
+/* Persist the current rule set so it survives a restart (loaded by
+   load_decoders). Writes <protos_dir>/decoders.rules. */
+static void persist_rules(void)
+{
+  char rp[1200];
+  snprintf(rp, sizeof rp, "%s/decoders.rules", protos_dir());
+  if (rules_save_file(rp) != 0)
+    gtcaca_dialog_message("Rules", "Could not write the rules file.\n"
+      "Set CARACAL_PROTOS_DIR to a writable directory to persist rules.");
+}
+
 /* "Decode As" a port: add a rule "<udp|tcp>.port == <port> => <Proto>". */
 static void add_port_rule(const char *transport, unsigned port, const char *proto)
 {
@@ -1973,7 +1984,9 @@ static const char *POSA_HELP[] = {
   "^S  save & load", "Esc close",
 };
 
-static void act_posa_new(void *u)
+/* Open the .posa editor with `initial` text. The save prompt is pre-filled with
+   `suggest_path` (typically <protos_dir>/<Name>.posa so it persists + reloads). */
+static void posa_editor_open(const char *title, const char *initial, const char *suggest_path)
 {
   gtcaca_window_widget_t *win;
   gtcaca_editor_widget_t *ed;
@@ -1981,12 +1994,11 @@ static void act_posa_new(void *u)
   gtcaca_editor_grammar_t *grammar;
   int w, h, edw, i;
   caca_event_t ev;
-  (void)u;
 
-  win = modal_window("New .posa decoder", &w, &h);
+  win = modal_window(title, &w, &h);
   edw = w * 62 / 100; if (edw < 20) edw = w - 2;
   ed  = gtcaca_editor_new(GTCACA_WIDGET(win), 1, 1, edw, h - 2);
-  gtcaca_editor_set_text(ed, POSA_TEMPLATE);
+  gtcaca_editor_set_text(ed, initial ? initial : POSA_TEMPLATE);
   /* TextMate-grammar syntax colouring (needs gtcaca built with Oniguruma). */
   {
     char gpath[1024];
@@ -2009,6 +2021,7 @@ static void act_posa_new(void *u)
     if (k == CACA_KEY_ESCAPE) break;
     if (k == CTRL('s')) {
       char fn[512], err[160];
+      snprintf(fn, sizeof fn, "%s", suggest_path ? suggest_path : "");
       if (prompt_line("Save .posa as:  ", fn, sizeof fn)) {
         FILE *f = fopen(fn, "w");
         if (f) {
@@ -2021,7 +2034,7 @@ static void act_posa_new(void *u)
           } else {
             invalidate_summaries(); view_rebuild();
             detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0);
-            gtcaca_dialog_message("Saved", "Decoder loaded. Bind it with Analyze > Decode As.");
+            gtcaca_dialog_message("Saved", "Decoder saved and reloaded.");
           }
         } else gtcaca_dialog_message("Save failed", "Could not open file for writing.");
       }
@@ -2038,107 +2051,273 @@ static void act_posa_new(void *u)
   modal_close_menu();
 }
 
-/* ── Decoders window (list built-in libpcapng protocols + posa + rules) ─── */
-static void decoders_fill(gtcaca_textview_widget_t *tv)
+static void act_posa_new(void *u)
 {
-  char line[200];
-  const char *const *builtins;
-  int i, n = 0;
-  gtcaca_textview_clear(tv);
+  char sp[1100];
+  (void)u;
+  snprintf(sp, sizeof sp, "%s/new.posa", protos_dir());
+  posa_editor_open("New .posa decoder", POSA_TEMPLATE, sp);
+}
 
-  builtins = pcapng_dissect_protocols(&n);
-  snprintf(line, sizeof line, "Built-in decoders (libpcapng, %d):", n);
-  gtcaca_textview_append(tv, line);
-  for (i = 0; i < n; i += 6) {
-    int j, o = 2;
-    line[0] = ' '; line[1] = ' ';
-    for (j = i; j < i + 6 && j < n; j++)
-      o += snprintf(line + o, sizeof line - o, "%-12s", builtins[j]);
-    line[o] = '\0';
+/* Open the editor on an existing decoder's regenerated source (persists on save). */
+static void posa_edit_existing(const posa_proto_t *p)
+{
+  char *text = malloc(65536), sp[1100], title[80];
+  if (!text) return;
+  posa_to_text(p, text, 65536);
+  snprintf(sp, sizeof sp, "%s/%s.posa", protos_dir(), p->name);
+  snprintf(title, sizeof title, "Edit decoder: %s", p->name);
+  posa_editor_open(title, text, sp);
+  free(text);
+}
+
+/* ── Decoders window ─────────────────────────────────────────────────────────
+ * A single selectable list of every decoder — built-in (libpcapng), custom
+ * (.posa) and the rules that bind conditions to decoders. The top line shows
+ * the selected item's rule/detail; Enter edits it (rule prompt, or the .posa
+ * field editor), and every change is persisted so it survives a restart. */
+typedef struct { int kind; int idx; } drow_t;   /* 0=built-in 1=posa 2=rule */
+
+/* Append a cfield subtree (abbrev + label, indented) to a textview. */
+static void tv_dump_fields(gtcaca_textview_widget_t *tv, cfield_t *n, int depth)
+{
+  cfield_t *c;
+  for (c = n->children; c; c = c->next) {
+    char line[240];
+    snprintf(line, sizeof line, "%*s%-22s %s", depth * 2, "",
+             c->abbrev[0] ? c->abbrev : "", c->label[0] ? c->label : "");
     gtcaca_textview_append(tv, line);
+    tv_dump_fields(tv, c, depth + 1);
   }
+}
 
-  gtcaca_textview_append(tv, "");
-  snprintf(line, sizeof line, "Custom .posa decoders (%d):", posa_count());
-  gtcaca_textview_append(tv, line);
-  for (i = 0; i < posa_count(); i++) {
+/* Show the fields a built-in decoder produces, taken from the first packet in
+   the capture that contains that protocol layer. */
+static void show_builtin_fields(const char *abbrev)
+{
+  long i;
+  for (i = 0; i < app.cap.count; i++) {
+    cfield_t *root = dissect_packet(&app.cap.pkts[i]);
+    cfield_t *layer[4];
+    int n = root ? cfield_collect(root, abbrev, layer, 4) : 0;
+    if (n > 0) {
+      gtcaca_window_widget_t *win;
+      gtcaca_textview_widget_t *tv;
+      int w, h;
+      char title[80];
+      snprintf(title, sizeof title, "Fields: %s  (from packet #%ld)", abbrev, i + 1);
+      win = modal_window(title, &w, &h);
+      tv  = gtcaca_textview_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 2);
+      gtcaca_textview_append(tv, layer[0]->label[0] ? layer[0]->label : abbrev);
+      tv_dump_fields(tv, layer[0], 1);
+      gtcaca_textview_append(tv, "");
+      gtcaca_textview_append(tv, "(fields produced live by libpcapng — [Esc] close)");
+      modal_scroll_loop(tv);
+      tv_destroy(tv);
+      CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
+      cfield_free(root);
+      return;
+    }
+    if (root) cfield_free(root);
+  }
+  gtcaca_dialog_message("Fields",
+    "No packet in this capture uses that decoder,\nso there are no example fields to show.");
+}
+
+/* Condition of the first rule that targets decoder `name` ("" if none). */
+static void decoder_rule_of(const char *name, char *out, size_t sz)
+{
+  int r; out[0] = '\0';
+  for (r = 0; r < rules_count(); r++) {
+    char e[192], pr[64];
+    rules_get(r, e, sizeof e, pr, sizeof pr);
+    if (!strcmp(pr, name)) { snprintf(out, sz, "%s", e); return; }
+  }
+}
+
+/* Build the decoder list, keeping only rows matching `filter` (""=all). */
+static int decoders_build(gtcaca_textlist_widget_t *tl, drow_t *rows, int maxrows,
+                          const char *filter)
+{
+  char line[240];
+  const char *const *bi;
+  int n = 0, i, nr = 0;
+  gtcaca_textlist_clear(tl);
+  bi = pcapng_dissect_protocols(&n);
+  for (i = 0; i < n && nr < maxrows; i++) {
+    snprintf(line, sizeof line, "  built-in  %-16s  auto (port/heuristic)", bi[i]);
+    if (!ci_contains(line, filter)) continue;
+    rows[nr].kind = 0; rows[nr].idx = i; nr++;
+    gtcaca_textlist_append(tl, line);
+  }
+  for (i = 0; i < posa_count() && nr < maxrows; i++) {
     const posa_proto_t *p = posa_at(i);
-    snprintf(line, sizeof line, "  %-24s  (group: %s)", p->name, p->parent);
-    gtcaca_textview_append(tv, line);
+    char rc[200]; decoder_rule_of(p->name, rc, sizeof rc);
+    snprintf(line, sizeof line, "  posa      %-16s  %2d fields%s%s",
+             p->name, p->nflds, rc[0] ? "   rule: " : "", rc);
+    if (!ci_contains(line, filter)) continue;
+    rows[nr].kind = 1; rows[nr].idx = i; nr++;
+    gtcaca_textlist_append(tl, line);
   }
-
-  gtcaca_textview_append(tv, "");
-  snprintf(line, sizeof line, "Decoder rules (%d)   [ condition => decoder ]:", rules_count());
-  gtcaca_textview_append(tv, line);
-  for (i = 0; i < rules_count(); i++) {
-    char expr[192], proto[64];
-    rules_get(i, expr, sizeof expr, proto, sizeof proto);
-    snprintf(line, sizeof line, "  %-40s => %s", expr, proto);
-    gtcaca_textview_append(tv, line);
+  for (i = 0; i < rules_count() && nr < maxrows; i++) {
+    char e[192], pr[64];
+    rules_get(i, e, sizeof e, pr, sizeof pr);
+    snprintf(line, sizeof line, "  rule      %-34s => %s", e, pr);
+    if (!ci_contains(line, filter)) continue;
+    rows[nr].kind = 2; rows[nr].idx = i; nr++;
+    gtcaca_textlist_append(tl, line);
   }
+  return nr;
+}
 
-  gtcaca_textview_append(tv, "");
-  gtcaca_textview_append(tv, "[i] import .posa   [n] new decoder   [r] add rule   [Esc] close");
+static void decoders_reload_view(void)
+{
+  invalidate_summaries(); view_rebuild();
+  detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0);
 }
 
 static void act_decoders(void *u)
 {
   gtcaca_window_widget_t *win;
-  gtcaca_textview_widget_t *tv;
-  int w, h, open_editor = 0;
+  gtcaca_textlist_widget_t *tl;
+  gtcaca_label_widget_t *hdr, *detail, *help;
+  drow_t rows[512];
+  int nrows, w, h, searching = 0;
+  char detailbuf[240], search[64] = "";
   caca_event_t ev;
   (void)u;
 
   win = modal_window("Decoders", &w, &h);
-  tv  = gtcaca_textview_new(GTCACA_WIDGET(win), 1, 1, w - 2, h - 2);
-  decoders_fill(tv);
-  tv->has_focus = 1;
+  hdr    = gtcaca_label_new(GTCACA_WIDGET(win), "  Type      Name / Rule", 2, 1);
+  hdr->width = w - 4;
+  detail = gtcaca_label_new(GTCACA_WIDGET(win), "", 2, 2);
+  detail->width = w - 4; detail->label = detailbuf;
+  tl = gtcaca_textlist_new(GTCACA_WIDGET(win), 2, 4);
+  gtcaca_textlist_widget_set_view_size(tl, h - 7 > 1 ? h - 7 : 1);
+  help = gtcaca_label_new(GTCACA_WIDGET(win),
+    "  Enter fields/edit   / search   r add-rule   d delete   n new   i import   Esc close", 2, h - 2);
+  help->width = w - 4;
+  nrows = decoders_build(tl, rows, 512, search);
+  tl->has_focus = 1;
 
   for (;;) {
-    int k;
+    int k, sel;
+    drow_t *rw;
+    sel = (int)tl->selected_item; if (sel < 0) sel = 0; if (sel >= nrows) sel = nrows ? nrows - 1 : 0;
+    rw  = nrows ? &rows[sel] : NULL;
+
+    if (searching)             snprintf(detailbuf, sizeof detailbuf, "Search: /%s", search);
+    else if (!rw)              snprintf(detailbuf, sizeof detailbuf, "(no decoders match)");
+    else if (rw->kind == 0) { int n; const char *const *bi = pcapng_dissect_protocols(&n);
+      snprintf(detailbuf, sizeof detailbuf, "Built-in: %s   [Enter] show extracted fields", bi[rw->idx]); }
+    else if (rw->kind == 1) { const posa_proto_t *p = posa_at(rw->idx);
+      snprintf(detailbuf, sizeof detailbuf, "posa %s (%d fields)   [Enter] edit fields   [r] add/replace rule",
+               p->name, p->nflds); }
+    else { char e[192], pr[64]; rules_get(rw->idx, e, sizeof e, pr, sizeof pr);
+      snprintf(detailbuf, sizeof detailbuf, "Rule:  %s => %s   [Enter] edit   [d] delete", e, pr); }
+
     gtcaca_redraw();
     if (!caca_get_event(gmo.dp, CACA_EVENT_KEY_PRESS, &ev, -1)) continue;
     k = caca_get_event_key_ch(&ev);
-    if (k == CACA_KEY_ESCAPE || k == 'q') break;
-    if (k == 'i') {
-      char path[1024], err[160];
-      if (gtcaca_filechooser_run(".", path, sizeof path, 0)) {
-        if (posa_load_file(path, err, sizeof err) < 0) gtcaca_dialog_message("Import failed", err);
-        else { invalidate_summaries(); view_rebuild();
-               detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0); }
-      }
-      decoders_fill(tv);
+
+    /* type-to-search: '/' starts it; while active, edit the query and filter. */
+    if (searching) {
+      int sl = (int)strlen(search);
+      if (k == CACA_KEY_ESCAPE) { searching = 0; search[0] = '\0'; nrows = decoders_build(tl, rows, 512, search); }
+      else if (k == CACA_KEY_RETURN || k == 10) searching = 0;
+      else if (k == CACA_KEY_UP)   gtcaca_textlist_selection_up(tl);
+      else if (k == CACA_KEY_DOWN) gtcaca_textlist_selection_down(tl);
+      else if ((k == CACA_KEY_BACKSPACE || k == CACA_KEY_DELETE) && sl > 0) {
+        search[--sl] = '\0'; nrows = decoders_build(tl, rows, 512, search); }
+      else if (k >= 32 && k < 127 && sl < (int)sizeof search - 1) {
+        search[sl] = (char)k; search[sl + 1] = '\0'; nrows = decoders_build(tl, rows, 512, search); }
       continue;
     }
-    if (k == 'r') {
-      char in[256], err[160] = "";
-      /* "<condition> => <Decoder>", e.g. "tcp.port == 3306 => MySQL" */
-      if (prompt_line("Rule (condition => Decoder):  ", in, sizeof in)) {
+    if (k == '/') { searching = 1; search[0] = '\0'; nrows = decoders_build(tl, rows, 512, search); continue; }
+
+    if (k == CACA_KEY_ESCAPE || k == 'q') break;
+    else if (k == CACA_KEY_UP)   { gtcaca_textlist_selection_up(tl);   continue; }
+    else if (k == CACA_KEY_DOWN) { gtcaca_textlist_selection_down(tl); continue; }
+    else if (k == CACA_KEY_RETURN || k == 10 || k == 'e') {
+      if (!rw) continue;
+      if (rw->kind == 0) { int n; const char *const *bi = pcapng_dissect_protocols(&n);
+            show_builtin_fields(bi[rw->idx]); }
+      else if (rw->kind == 1) { posa_edit_existing(posa_at(rw->idx)); }
+      else {                                       /* edit a rule */
+        char in[260], err[160] = "";
+        char e[192], pr[64]; rules_get(rw->idx, e, sizeof e, pr, sizeof pr);
+        snprintf(in, sizeof in, "%s => %s", e, pr);
+        if (prompt_line("Rule (condition => Decoder):  ", in, sizeof in)) {
+          char *arrow = strstr(in, "=>");
+          if (!arrow) gtcaca_dialog_message("Edit rule", "Expected: <condition> => <Decoder>");
+          else {
+            char *cond = in, *proto = arrow + 2; *arrow = '\0';
+            while (*cond == ' ') cond++; while (*proto == ' ') proto++;
+            { char *z = cond + strlen(cond); while (z > cond && z[-1] == ' ') *--z = '\0'; }
+            { char *z = proto + strlen(proto); while (z > proto && z[-1] == ' ') *--z = '\0'; }
+            if (rules_set(rw->idx, cond, proto, err, sizeof err) < 0)
+              gtcaca_dialog_message("Edit rule", err[0] ? err : "invalid rule");
+            else { persist_rules(); decoders_reload_view(); }
+          }
+        }
+      }
+      nrows = decoders_build(tl, rows, 512, search);
+      continue;
+    }
+    else if (k == 'r') {                            /* add a rule */
+      char in[260], err[160] = "";
+      if (rw && rw->kind == 1) {                    /* pre-target the posa decoder */
+        const posa_proto_t *p = posa_at(rw->idx);
+        char cond[200] = "";
+        char prompt[80]; snprintf(prompt, sizeof prompt, "Condition for %s:  ", p->name);
+        if (prompt_line(prompt, cond, sizeof cond) && cond[0]) {
+          if (rules_add(cond, p->name, err, sizeof err) < 0)
+            gtcaca_dialog_message("Add rule", err[0] ? err : "invalid rule");
+          else { persist_rules(); decoders_reload_view(); }
+        }
+      } else if (prompt_line("Rule (condition => Decoder):  ", in, sizeof in)) {
         char *arrow = strstr(in, "=>");
         if (!arrow) gtcaca_dialog_message("Add rule", "Expected: <condition> => <Decoder>");
         else {
-          char *cond = in, *proto = arrow + 2;
-          *arrow = '\0';
-          while (*cond == ' ') cond++;
-          while (*proto == ' ') proto++;
-          { char *e = cond + strlen(cond); while (e > cond && e[-1] == ' ') *--e = '\0'; }
-          { char *e = proto + strlen(proto); while (e > proto && e[-1] == ' ') *--e = '\0'; }
+          char *cond = in, *proto = arrow + 2; *arrow = '\0';
+          while (*cond == ' ') cond++; while (*proto == ' ') proto++;
+          { char *z = cond + strlen(cond); while (z > cond && z[-1] == ' ') *--z = '\0'; }
+          { char *z = proto + strlen(proto); while (z > proto && z[-1] == ' ') *--z = '\0'; }
           if (rules_add(cond, proto, err, sizeof err) < 0)
             gtcaca_dialog_message("Add rule", err[0] ? err : "invalid rule");
-          else { invalidate_summaries(); view_rebuild();
-                 detail_rebuild(app.table ? gtcaca_table_selected_row(app.table) : 0); }
+          else { persist_rules(); decoders_reload_view(); }
         }
       }
-      decoders_fill(tv);
+      nrows = decoders_build(tl, rows, 512, search);
       continue;
     }
-    if (k == 'n') { open_editor = 1; break; }
-    if (tv->private_key_cb) tv->private_key_cb(tv, k, NULL);
+    else if (k == 'd') {                            /* delete a rule */
+      if (rw && rw->kind == 2) {
+        rules_remove(rw->idx); persist_rules(); decoders_reload_view();
+        nrows = decoders_build(tl, rows, 512, search);
+      } else gtcaca_dialog_message("Delete", "Select a rule row to delete.");
+      continue;
+    }
+    else if (k == 'n') { act_posa_new(NULL); nrows = decoders_build(tl, rows, 512, search); continue; }
+    else if (k == 'i') {
+      char path[1024], err[160];
+      if (gtcaca_filechooser_run(".", path, sizeof path, 0)) {
+        if (posa_load_file(path, err, sizeof err) < 0) gtcaca_dialog_message("Import failed", err);
+        else decoders_reload_view();
+      }
+      nrows = decoders_build(tl, rows, 512, search);
+      continue;
+    }
+    else if (tl->private_key_cb) tl->private_key_cb(tl, k, NULL);
   }
-  tv_destroy(tv);
-  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win)); free(win);
+
+  gtcaca_textlist_clear(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(help));   free(help);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(tl));     free(tl);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(detail)); free(detail);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(hdr));    free(hdr);
+  CDL_DELETE(gmo.widgets_list, GTCACA_WIDGET(win));    free(win);
   modal_close_menu();
-  if (open_editor) act_posa_new(NULL);
 }
 
 /* ───────────────────────── View: show/hide detail panes ───────────────── */
