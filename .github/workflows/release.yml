@@ -14,9 +14,9 @@ on:
 # containing it, replace the SHAs with the tag names — `ref:` takes either.
 env:
   GTCACA_REPO: stricaud/gtcaca
-  GTCACA_REF: 285ec1bb8e030c13ee8915dec4bd4025e969508f      # "Add windows target"
+  GTCACA_REF: 0021df4065435fd39b6da01c15319cc2cd18a030      # "Add mingw as toolchain"
   LIBPCAPNG_REPO: stricaud/libpcapng
-  LIBPCAPNG_REF: 2161d70b79603d3f634900f9fee658bc5306c560   # Windows compat + win_compat.h
+  LIBPCAPNG_REF: 668bb8ac2e369e2342d3b2c2c71a49ae91f5a807   # "Build with msvc"
 
 jobs:
   package:
