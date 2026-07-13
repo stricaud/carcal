@@ -106,15 +106,37 @@ Object<main> SensorBeacon
     required uint8  seq = 0
 ```
 
-Then bind it to a transport port via **Analyze ▸ Decode As…**, entering e.g.
-`udp 6666 SensorBeacon`. Matching packets are then dissected with that protocol,
-its fields appearing in the detail tree and usable in filters
-(`SensorBeacon.seq == 1`).
+Bind it to a transport port either **in the file itself**, with a `rule` line —
+
+```
+rule udp.port == 6666 => SensorBeacon
+```
+
+— or at runtime via **Analyze ▸ Decode As…**, entering e.g. `udp 6666
+SensorBeacon`. Matching packets are then dissected with that protocol, its fields
+appearing in the detail tree and usable in filters (`SensorBeacon.seq == 1`).
+
+Bindings are **entirely data-driven**: a `rule` line is applied by libpcapng while
+dissecting, so dropping a `.posa` into `protos/` is all it takes to teach carcal a
+new protocol — no C change and no rebuild. (There are deliberately no compiled-in
+decoder rules; adding one that a `.posa` already declares would decode the packet
+twice and attach the subtree twice.) `rule` binds a port; **Decode As…** and
+`protos/decoders.rules` take any display-filter condition, for what a port can't
+express.
 
 Field types: `uint8/16/32/64`, `le_uint16/32/64`, `mac`, `ip4`, `cstring`,
 `payload`, `bytes<N>`, `bytes[lenfield]`. Indented `NAME = value` lines under an
 integer field define enum labels. `Object<parent>` groups sub-protocols
-dispatched on the first field's value (see `protos/tftp.posa`).
+dispatched on the first field's value (see `protos/tftp.posa`). The extended
+grammar adds `layer`, `scope`, `when`, `string … until`, `info` and `rule` — see
+`protos/rdp.posa`.
+
+### Bundled decoders
+
+| file | protocol | binds to |
+| --- | --- | --- |
+| `protos/tftp.posa` | TFTP (RFC 1350), dispatched by opcode | `udp.port == 69` |
+| `protos/rdp.posa` | RDP over TPKT / X.224 COTP — connection request/confirm, `mstshash` cookie and the negotiation request (requested security protocols) | `tcp.port == 3389` |
 
 ## Command-line scripting (LuaJIT)
 
@@ -191,6 +213,9 @@ Prebuilt binaries for **Windows, macOS and Linux**:
 **[stricaud.github.io/carcal](https://stricaud.github.io/carcal/)** (or the
 [releases page](https://github.com/stricaud/carcal/releases)).
 
+On macOS, open the `.dmg` and either drag `carcal.app` to Applications or run the
+`.pkg` inside it to get `carcal` on your `PATH`.
+
 On Windows, either run the `setup.exe` installer (Start Menu entry, optional
 `.pcap`/`.pcapng` association, uninstaller) or unzip the portable `.zip` anywhere
 and run `carcal.exe` — no admin rights needed; it finds its `protos\` and
@@ -230,10 +255,13 @@ wherever it's unpacked.
 
 `build.sh` also emits a native installer alongside the tarball:
 
-- **macOS** — `dist/carcal-macos-<arch>.pkg` (installs to `/usr/local/carcal`,
-  symlinks `/usr/local/bin/carcal`). Unsigned, so first run is right-click ▸
-  Open or `installer -pkg … -target /`; sign/notarize separately for wide
-  distribution.
+- **macOS** — `dist/carcal-macos-<arch>.dmg`, the disk image users actually
+  download. It holds both `carcal.app` (drag to the `/Applications` symlink;
+  double-clicking opens carcal in a new Terminal window, since it's a TUI) and
+  the `.pkg` for anyone who'd rather have `carcal` on their `PATH`. Also emitted
+  standalone: `dist/carcal-macos-<arch>.pkg` (installs to `/usr/local/carcal`,
+  symlinks `/usr/local/bin/carcal`). Both are unsigned, so first run is
+  right-click ▸ Open; sign/notarize separately for wide distribution.
 - **Linux** — `dist/carcal-linux-<arch>.AppImage`, a single self-contained
   executable (built with `linuxdeploy`; an `AppRun` hook points carcal at its
   bundled data). Falls back to just the tarball if `linuxdeploy` can't be

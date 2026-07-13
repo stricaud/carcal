@@ -128,23 +128,29 @@ cmake .. &amp;&amp; make
   function classify(name) {
     var n = name.toLowerCase();
     if (n.indexOf('windows') !== -1 || /\.(zip|exe)$/.test(n))  return 'windows';
-    if (n.indexOf('macos') !== -1 || /\.pkg$/.test(n))          return 'macos';
+    if (n.indexOf('macos') !== -1 || /\.(pkg|dmg)$/.test(n))    return 'macos';
     if (n.indexOf('linux') !== -1 || /\.appimage$/.test(n))     return 'linux';
     return 'other';
   }
 
-  function isInstaller(name) { return /\.(exe|pkg|msi)$/i.test(name); }
+  // Which asset the big button points at: the one each platform's users expect
+  // to double-click — a .dmg on macOS, a setup.exe on Windows. Linux has no such
+  // convention, so it gets the archive.
+  var PRIMARY = { windows: /setup\.exe$|\.exe$/i, macos: /\.dmg$/i };
 
-  // Which asset the big button points at. Windows users expect a Setup.exe, so
-  // lead with it there. On macOS the .pkg is unsigned (Gatekeeper makes it a
-  // worse first experience than the tarball), so lead with the archive.
   function preferred(os, assets) {
-    var installers = assets.filter(function (a) { return isInstaller(a.name); });
-    var archives   = assets.filter(function (a) { return !isInstaller(a.name); });
-    var order = os === 'windows' ? installers.concat(archives)
-                                 : archives.concat(installers);
-    return order[0];
+    var pat = PRIMARY[os];
+    if (pat) {
+      for (var i = 0; i < assets.length; i++)
+        if (pat.test(assets[i].name)) return assets[i];
+    }
+    // No preferred format shipped for this OS — fall back to a plain archive.
+    for (var j = 0; j < assets.length; j++)
+      if (!/\.(exe|pkg|msi|dmg)$/i.test(assets[j].name)) return assets[j];
+    return assets[0];
   }
+
+  function isInstaller(name) { return /\.(exe|pkg|msi|dmg)$/i.test(name); }
 
   var LABEL = { windows: 'Windows', macos: 'macOS', linux: 'Linux', other: 'Source' };
 

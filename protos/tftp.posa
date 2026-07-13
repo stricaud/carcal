@@ -1,7 +1,8 @@
 # tftp.posa — TFTP (RFC 1350), dispatched by opcode.
 #
-# Load is automatic (carcal reads its protos/ dir at startup). Bind it to the
-# TFTP port with:  Analyze ▸ Decode As…  →  udp 69 TFTP
+# Load is automatic (carcal reads its protos/ dir at startup) and the `rule`
+# line at the bottom binds it to the TFTP port, so it decodes out of the box.
+# To bind it somewhere else too:  Analyze ▸ Decode As…
 
 Object<TFTP> TFTP_RRQ
     required uint16  opcode = 1
@@ -31,3 +32,5 @@ Object<TFTP> TFTP_ERROR
         ERROR = 5
     required uint16  code = 0
     required cstring msg
+
+rule udp.port == 69 => TFTP

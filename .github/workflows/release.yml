@@ -113,6 +113,24 @@ jobs:
           export LIBPCAPNG_SRC="$(cd ../libpcapng && pwd)"
           bash packaging/build.sh
 
+      - name: Smoke-test the macOS app
+        if: runner.os == 'macOS'
+        working-directory: carcal
+        run: |
+          # Mount the .dmg and run the binary inside carcal.app, exactly as a
+          # user would get it: proves the bundled dylibs still resolve through
+          # @executable_path/../lib and that protos/ is found inside the bundle.
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00\xaa\xbb\xcc\xdd\xee\xff\x11\x22\x33\x44\x55\x66\x08\x00\x45\x00\x00\x1c\x00\x01\x00\x00\x40\x11\x00\x00\x7f\x00\x00\x01\x7f\x00\x00\x01\x00\x35\x00\x35\x00\x08\x00\x00' > smoke.pcap
+          mnt="$(hdiutil attach dist/carcal-macos-*.dmg -nobrowse -readonly | grep -o '/Volumes/.*' | head -1)"
+          app="$mnt/carcal.app/Contents"
+          out="$(CARCAL_PROTOS_DIR="$app/Resources/share/carcal/protos" \
+                 CARCAL_GRAMMARS_DIR="$app/Resources/share/carcal/grammars" \
+                 "$app/MacOS/carcal" --dump smoke.pcap)"
+          echo "$out"
+          hdiutil detach "$mnt" >/dev/null
+          echo "$out" | grep -q "User Datagram Protocol" \
+            || { echo "smoke test failed: UDP layer not dissected" >&2; exit 1; }
+
       - name: Smoke-test the Windows binary
         if: runner.os == 'Windows'
         working-directory: carcal
@@ -136,6 +154,7 @@ jobs:
           path: |
             carcal/dist/*.tar.gz
             carcal/dist/*.pkg
+            carcal/dist/*.dmg
             carcal/dist/*.AppImage
             carcal/dist/*.zip
             carcal/dist/*setup.exe
@@ -147,6 +166,7 @@ jobs:
           files: |
             carcal/dist/*.tar.gz
             carcal/dist/*.pkg
+            carcal/dist/*.dmg
             carcal/dist/*.AppImage
             carcal/dist/*.zip
             carcal/dist/*setup.exe

@@ -35,6 +35,7 @@ case "$(uname -s)" in
   Darwin)
     "$ROOT/packaging/bundle-macos.sh"        # self-contained tarball
     "$ROOT/packaging/macos-pkg.sh"           # + installer .pkg
+    "$ROOT/packaging/macos-dmg.sh"           # + .dmg (carcal.app + the .pkg)
     ;;
   Linux)
     "$ROOT/packaging/bundle-linux.sh"        # self-contained tarball

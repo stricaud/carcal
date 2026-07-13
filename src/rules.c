@@ -145,14 +145,18 @@ int rules_load_file(const char *path, char *errbuf, size_t errlen)
   return n;
 }
 
-/* Compiled-in defaults: standard protocols are decoded by libpcapng itself, so
-   the built-in rules just bind the bundled posa decoders. */
+/* No compiled-in decoder rules.
+ *
+ * A bundled decoder declares its own binding in its .posa, as a
+ *     rule <tcp|udp>.port == N => Proto
+ * line, which libpcapng applies while dissecting (see pcapng_posa_bound_port).
+ * Duplicating that here would decode the packet twice and attach the subtree
+ * twice. Dropping a new .posa into protos/ is therefore all it takes — no C
+ * change, no rebuild.
+ *
+ * This table stays for rules the .posa grammar can't express: `rule` only binds
+ * a port, whereas rules_add() takes any display-filter condition (Analyze ▸
+ * Decode As…, and protos/decoders.rules) — those are loaded elsewhere. */
 void rules_load_defaults(void)
 {
-  static const char *const DEF[][2] = {
-    { "udp.port == 69", "TFTP" },   /* bundled protos/tftp.posa */
-  };
-  int i;
-  for (i = 0; i < (int)(sizeof DEF / sizeof DEF[0]); i++)
-    rules_add(DEF[i][0], DEF[i][1], NULL, 0);
 }
