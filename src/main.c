@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #  include <gtcaca/win_compat.h>   /* usleep, isatty, ... (also pulls windows.h) */
@@ -117,6 +118,11 @@ static void load_decoders(void)
   rules_load_defaults();          /* compiled-in default decoder rules         */
   snprintf(rp, sizeof rp, "%s/decoders.rules", protos_dir());
   rules_load_file(rp, NULL, 0);   /* optional user rules (protos/decoders.rules) */
+
+  /* Coloring rules, composed after the decoders so the `color` lines the .posa
+     files declared are picked up (see colorrules_reload). */
+  snprintf(rp, sizeof rp, "%s/colorfilters", protos_dir());
+  colorrules_reload(rp);
 }
 
 /* Persist the current rule set so it survives a restart (loaded by
@@ -142,6 +148,27 @@ static void add_port_rule(const char *transport, unsigned port, const char *prot
    reachable from the keyboard without F10 — which GNOME Terminal, xterm and
    friends swallow for their own menubar before carcal ever sees it. */
 enum { FOCUS_FILTER = 0, FOCUS_TABLE, FOCUS_TREE, FOCUS_HEX, FOCUS_MENU, FOCUS_COUNT };
+
+/* View ▸ Time Display Format (Wireshark's set, minus the ones that need a
+   capture-file start time we don't track). */
+enum {
+  TF_REL_FIRST = 0,   /* seconds since the first packet  (Wireshark's default) */
+  TF_TIME_OF_DAY,     /* wall-clock hh:mm:ss.uuuuuu                            */
+  TF_DATE_TIME,       /* yyyy-mm-dd hh:mm:ss.uuuuuu                            */
+  TF_EPOCH,           /* seconds since 1970                                    */
+  TF_DELTA_PREV_CAP,  /* since the previous captured packet                    */
+  TF_DELTA_PREV_DISP, /* since the previous *displayed* packet                 */
+  TF_COUNT
+};
+static const char *TF_NAMES[TF_COUNT] = {
+  "Seconds since first packet", "Time of day", "Date and time of day",
+  "Seconds since epoch", "Since previous captured", "Since previous displayed"
+};
+
+/* Fixed packet-list columns; custom ones (Apply as Column) append after these. */
+enum { COL_NO = 0, COL_TIME, COL_SRC, COL_DST, COL_PROTO, COL_LEN, COL_INFO,
+       COL_BUILTIN_COUNT };
+#define MAX_COLUMNS 16
 
 typedef struct {
   capture_t cap;
@@ -184,6 +211,31 @@ typedef struct {
   int  cap_follow;           /* auto-scroll to the newest packet */
   char cap_iface[64];
   char cap_filter[256];      /* last capture filter, for Restart */
+
+  /* View ▸ Time Display Format */
+  int  timefmt;              /* TF_* */
+
+  /* Edit ▸ Mark: one flag per captured packet (not persisted, like Wireshark).
+     Grown with the capture, so a live capture can mark as it goes. */
+  uint8_t *marked;
+  long     marked_cap;
+  long     nmarked;
+
+  /* Packet-list columns: the 6 fixed ones plus any added with Apply as Column. */
+  struct {
+    char title[24];
+    char abbrev[CFIELD_ABBREV_MAX];  /* "" = one of the built-ins below */
+    int  builtin;                    /* COL_* for the fixed columns, -1 custom */
+  } cols[MAX_COLUMNS];
+  int ncols;
+
+  /* Row-color cache: one byte per packet — 0 = not computed, 1 = no rule
+     matched, 2 = matched (colors in colorfg/colorbg). Colouring a row means
+     dissecting it, so without this the table would re-dissect on every redraw. */
+  uint8_t *colorstate;
+  uint8_t *colorfg;
+  uint8_t *colorbg;
+  long     color_cap;
 } app_t;
 
 static app_t app;
@@ -209,9 +261,20 @@ static long view_pkt_index(long row)   /* table row → cap.pkts index */
   return app.view[row];
 }
 
+static void perpkt_arrays_sync(void);   /* both defined with the table model below */
+static void colors_invalidate(void);
+
 static void view_rebuild(void)
 {
   long i;
+  /* The marks + color cache are indexed by packet, so they must cover the
+     capture before any row is drawn. */
+  perpkt_arrays_sync();
+  /* Anything that rebuilds the view may also have changed how packets dissect
+     (a new Decode As, an imported .posa, a reloaded file), and a color is a
+     function of the dissection — so drop the cache. It is only a memset; this
+     loop is about to re-dissect every packet anyway. */
+  colors_invalidate();
   app.nview = 0;
   for (i = 0; i < app.cap.count; i++) {
     cfield_t *root;
@@ -280,16 +343,117 @@ static void detail_rebuild(long row)
   hex_fill(pidx >= 0 ? &app.cap.pkts[pidx] : NULL);
 }
 
+/* ───────────────────────── columns ────────────────────────────────────── */
+static void columns_init(void)
+{
+  static const char *H[COL_BUILTIN_COUNT] = {
+    "No.", "Time", "Source", "Destination", "Protocol", "Length", "Info"
+  };
+  int i;
+  app.ncols = 0;
+  for (i = 0; i < COL_BUILTIN_COUNT; i++) {
+    snprintf(app.cols[i].title, sizeof app.cols[i].title, "%s", H[i]);
+    app.cols[i].abbrev[0] = '\0';
+    app.cols[i].builtin = i;
+    app.ncols++;
+  }
+}
+
+/* Column widths must be recomputed whenever the column set changes: they are a
+   fixed array in the widget, and a column the array doesn't cover is simply not
+   drawn. Info soaks up whatever the others leave. */
+static void columns_apply_widths(void)
+{
+  int widths[MAX_COLUMNS];
+  int i, used = 0, ncustom, inner_w;
+
+  if (!app.table) return;
+  inner_w = app.table->width - 2;
+  ncustom = app.ncols - COL_BUILTIN_COUNT;
+
+  widths[COL_NO] = 7;  widths[COL_TIME]  = 12; widths[COL_SRC] = 18;
+  widths[COL_DST] = 18; widths[COL_PROTO] = 9;  widths[COL_LEN] = 7;
+  for (i = 0; i < COL_INFO; i++) used += widths[i];
+  for (i = 0; i < ncustom; i++) { widths[COL_BUILTIN_COUNT + i] = 16; used += 16; }
+
+  widths[COL_INFO] = inner_w - used;
+  if (widths[COL_INFO] < 8) widths[COL_INFO] = 8;   /* never squeeze Info away */
+  gtcaca_table_set_column_widths(app.table, widths, app.ncols);
+}
+
+/* Analyze ▸ Apply as Column: show a field's value for every packet. */
+static int columns_add(const char *abbrev)
+{
+  int i;
+  if (!abbrev || !*abbrev || app.ncols >= MAX_COLUMNS) return -1;
+  for (i = 0; i < app.ncols; i++)                    /* already shown? */
+    if (app.cols[i].builtin < 0 && !strcmp(app.cols[i].abbrev, abbrev)) return -1;
+  snprintf(app.cols[app.ncols].title,  sizeof app.cols[0].title,  "%s", abbrev);
+  snprintf(app.cols[app.ncols].abbrev, sizeof app.cols[0].abbrev, "%s", abbrev);
+  app.cols[app.ncols].builtin = -1;
+  app.ncols++;
+  columns_apply_widths();
+  return 0;
+}
+
+static void columns_remove_custom(void)
+{
+  app.ncols = COL_BUILTIN_COUNT;
+  columns_apply_widths();
+}
+
+/* Time column, per View ▸ Time Display Format. `row` is needed for the
+   "since previous displayed" format, which depends on the filtered view. */
+static void format_time(const cpkt_t *p, long row, char *b, int l)
+{
+  uint64_t us = p->ts_us;
+  time_t   secs = (time_t)(us / 1000000ULL);
+  unsigned frac = (unsigned)(us % 1000000ULL);
+  struct tm tmv;
+
+  switch (app.timefmt) {
+  case TF_TIME_OF_DAY:
+    localtime_r(&secs, &tmv);
+    snprintf(b, l, "%02d:%02d:%02d.%06u", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, frac);
+    break;
+  case TF_DATE_TIME:
+    localtime_r(&secs, &tmv);
+    snprintf(b, l, "%04d-%02d-%02d %02d:%02d:%02d.%06u",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec, frac);
+    break;
+  case TF_EPOCH:
+    snprintf(b, l, "%llu.%06u", (unsigned long long)secs, frac);
+    break;
+  case TF_DELTA_PREV_CAP: {
+    long pidx = view_pkt_index(row);
+    uint64_t prev = (pidx > 0) ? app.cap.pkts[pidx - 1].ts_us : us;
+    snprintf(b, l, "%.6f", (double)(us >= prev ? us - prev : 0) / 1e6);
+    break;
+  }
+  case TF_DELTA_PREV_DISP: {
+    long ppidx = (row > 0) ? view_pkt_index(row - 1) : -1;
+    uint64_t prev = (ppidx >= 0) ? app.cap.pkts[ppidx].ts_us : us;
+    snprintf(b, l, "%.6f", (double)(us >= prev ? us - prev : 0) / 1e6);
+    break;
+  }
+  case TF_REL_FIRST:
+  default:
+    snprintf(b, l, "%.6f",
+             (double)((us >= app.cap.first_ts_us) ? us - app.cap.first_ts_us : 0) / 1e6);
+    break;
+  }
+}
+
 /* ───────────────────────── table model ────────────────────────────────── */
 static long tm_rows(gtcaca_table_model_t *m) { (void)m; return app.nview; }
-static int  tm_cols(gtcaca_table_model_t *m) { (void)m; return 7; }
+static int  tm_cols(gtcaca_table_model_t *m) { (void)m; return app.ncols; }
 
 static void tm_header(gtcaca_table_model_t *m, int col, char *b, int l)
 {
-  static const char *h[] = { "No.", "Time", "Source", "Destination",
-                             "Protocol", "Length", "Info" };
   (void)m;
-  snprintf(b, l, "%s", (col >= 0 && col < 7) ? h[col] : "");
+  if (col < 0 || col >= app.ncols) { b[0] = '\0'; return; }
+  snprintf(b, l, "%s", app.cols[col].title);
 }
 
 static void tm_cell(gtcaca_table_model_t *m, long row, int col, char *b, int l)
@@ -297,27 +461,103 @@ static void tm_cell(gtcaca_table_model_t *m, long row, int col, char *b, int l)
   long pidx = view_pkt_index(row);
   cpkt_t *p;
   (void)m;
-  if (pidx < 0) { b[0] = '\0'; return; }
+  b[0] = '\0';
+  if (pidx < 0 || col < 0 || col >= app.ncols) return;
   p = &app.cap.pkts[pidx];
-  dissect_summarize(p);
-  switch (col) {
-  case 0: snprintf(b, l, "%ld", pidx + 1); break;
-  case 1: {
-    double t = (double)((p->ts_us >= app.cap.first_ts_us)
-                          ? p->ts_us - app.cap.first_ts_us : 0) / 1e6;
-    snprintf(b, l, "%.6f", t);
-    break;
+
+  /* A custom column has to dissect the packet to read the field out of it —
+     only the rows actually on screen ever get here, so this stays cheap. */
+  if (app.cols[col].builtin < 0) {
+    cfield_t *root = dissect_packet(p);
+    cfield_t *f = root ? cfield_find(root, app.cols[col].abbrev) : NULL;
+    if (f) cfield_value_str(f, b, (size_t)l);
+    if (root) cfield_free(root);
+    return;
   }
-  case 2: snprintf(b, l, "%s", p->col_src); break;
-  case 3: snprintf(b, l, "%s", p->col_dst); break;
-  case 4: snprintf(b, l, "%s", p->col_proto); break;
-  case 5: snprintf(b, l, "%u", p->origlen); break;
-  case 6: snprintf(b, l, "%s", p->col_info); break;
-  default: b[0] = '\0';
+
+  dissect_summarize(p);
+  switch (app.cols[col].builtin) {
+  case COL_NO:    snprintf(b, l, "%s%ld",
+                           (app.marked && pidx < app.cap.count && app.marked[pidx]) ? "*" : "",
+                           pidx + 1); break;
+  case COL_TIME:  format_time(p, row, b, l); break;
+  case COL_SRC:   snprintf(b, l, "%s", p->col_src); break;
+  case COL_DST:   snprintf(b, l, "%s", p->col_dst); break;
+  case COL_PROTO: snprintf(b, l, "%s", p->col_proto); break;
+  case COL_LEN:   snprintf(b, l, "%u", p->origlen); break;
+  case COL_INFO:  snprintf(b, l, "%s", p->col_info); break;
+  default: break;
   }
 }
 
-static gtcaca_table_model_t table_model = { tm_rows, tm_cols, tm_header, tm_cell, NULL };
+/* Per-row colors: the coloring rules, with marked packets overriding them (as
+   in Wireshark, a marked packet is always visually unmistakable).
+   Colouring means dissecting, so results are cached per packet — otherwise every
+   redraw would re-dissect the whole visible window. */
+static int tm_row_color(gtcaca_table_model_t *m, long row, uint8_t *fg, uint8_t *bg)
+{
+  long pidx = view_pkt_index(row);
+  (void)m;
+  if (pidx < 0 || pidx >= app.cap.count) return 0;
+
+  if (app.marked && app.marked[pidx]) { *fg = CACA_WHITE; *bg = CACA_BLACK; return 1; }
+  if (!colorrules_enabled()) return 0;
+  if (!app.colorstate || pidx >= app.color_cap) return 0;
+
+  if (app.colorstate[pidx] == 0) {                 /* not computed yet */
+    cfield_t *root = dissect_packet(&app.cap.pkts[pidx]);
+    uint8_t f = 0, b = 0;
+    int hit = root ? colorrules_match(root, &f, &b) : 0;
+    if (root) cfield_free(root);
+    app.colorstate[pidx] = hit ? 2 : 1;
+    app.colorfg[pidx] = f;
+    app.colorbg[pidx] = b;
+  }
+  if (app.colorstate[pidx] != 2) return 0;
+  *fg = app.colorfg[pidx];
+  *bg = app.colorbg[pidx];
+  return 1;
+}
+
+static gtcaca_table_model_t table_model = {
+  tm_rows, tm_cols, tm_header, tm_cell, NULL, tm_row_color
+};
+
+/* Grow the per-packet side arrays (marks + color cache) to cover the capture.
+   Called whenever the capture changes size, including during a live capture. */
+static void perpkt_arrays_sync(void)
+{
+  long n = app.cap.count;
+  if (n > app.color_cap) {
+    long ncap = n + 1024;
+    app.colorstate = realloc(app.colorstate, (size_t)ncap);
+    app.colorfg    = realloc(app.colorfg,    (size_t)ncap);
+    app.colorbg    = realloc(app.colorbg,    (size_t)ncap);
+    if (app.colorstate && app.colorfg && app.colorbg) {
+      memset(app.colorstate + app.color_cap, 0, (size_t)(ncap - app.color_cap));
+      app.color_cap = ncap;
+    } else {
+      app.color_cap = 0;   /* out of memory: fall back to no coloring */
+    }
+  }
+  if (n > app.marked_cap) {
+    long ncap = n + 1024;
+    uint8_t *nm = realloc(app.marked, (size_t)ncap);
+    if (nm) {
+      memset(nm + app.marked_cap, 0, (size_t)(ncap - app.marked_cap));
+      app.marked = nm;
+      app.marked_cap = ncap;
+    }
+  }
+}
+
+/* The coloring rules changed (or the decoders did) — drop the cache so rows are
+   recomputed with the new rules. */
+static void colors_invalidate(void)
+{
+  if (app.colorstate && app.color_cap > 0)
+    memset(app.colorstate, 0, (size_t)app.color_cap);
+}
 
 /* ───────────────────────── tree model ─────────────────────────────────── */
 /* Nodes are cfield_t*. The super-root (NULL) maps to detail_root's children. */
@@ -1731,7 +1971,9 @@ static void nfp_cell(gtcaca_table_model_t *m, long row, int col, char *b, int l)
   default: b[0] = '\0';
   }
 }
-static gtcaca_table_model_t nf_pkt_model = { nfp_rows, nfp_cols, tm_header, nfp_cell, NULL };
+/* Reuses tm_header: cols[0..6] are always the built-in columns, so this shows
+   the same seven titles even if the main list has custom columns appended. */
+static gtcaca_table_model_t nf_pkt_model = { nfp_rows, nfp_cols, tm_header, nfp_cell, NULL, NULL };
 
 /* Populate the mind-map: Capture → hosts → conversations. */
 static void nf_fill_mindmap(gtcaca_mindmap_widget_t *mm)
@@ -2365,6 +2607,7 @@ static void act_decoders(void *u)
 
 /* ───────────────────────── View: show/hide detail panes ───────────────── */
 static int g_view_entry = -1, g_item_details, g_item_bytes;
+static int g_item_timefmt, g_item_colorize;
 
 /* Recompute geometry from the show_tree/show_hex flags: the packet table grows
    to fill whatever the detail panes give up. */
@@ -2411,6 +2654,12 @@ static void update_view_labels(void)
            "[%c] Packet Details", app.show_tree ? 'x' : ' ');
   snprintf(app.menu->entries[g_view_entry].items[g_item_bytes].label, GTCACA_MENU_LABEL_MAX,
            "[%c] Packet Bytes", (app.show_hex && app.hex) ? 'x' : ' ');
+  /* Show the *current* time format on the item, so the menu doubles as the
+     indicator of which one is active. */
+  snprintf(app.menu->entries[g_view_entry].items[g_item_timefmt].label, GTCACA_MENU_LABEL_MAX,
+           "Time: %s", TF_NAMES[app.timefmt]);
+  snprintf(app.menu->entries[g_view_entry].items[g_item_colorize].label, GTCACA_MENU_LABEL_MAX,
+           "[%c] Colorize Packet List", colorrules_enabled() ? 'x' : ' ');
 }
 
 static void act_toggle_details(void *u)
@@ -2433,6 +2682,7 @@ static void capture_cb(const pcapng_packet_info_t *pkt, void *ud)
   idx = capture_append(&app.cap, pkt->data, pkt->captured_len, pkt->original_len,
                        pkt->timestamp_ns / 1000ULL, LINKTYPE_ETHERNET);
   if (idx < 0) return;
+  perpkt_arrays_sync();          /* keep marks + color cache sized with the capture */
   if (!app.filter) { view_push(idx); return; }
   {
     cfield_t *root = dissect_packet(&app.cap.pkts[idx]);
@@ -2587,6 +2837,201 @@ static void act_capture_restart(void *u)
   start_capture(app.cap_iface, app.cap_filter);                /* same iface + filter, fresh */
 }
 
+/* ── Apply as Filter / Prepare as Filter / Apply as Column ───────────────── */
+/* All of these read the field the detail tree's cursor is on and turn it into a
+   display filter — the one primitive (cfield_filter_expr) they share. */
+
+static cfield_t *selected_field(void)
+{
+  return app.tree ? (cfield_t *)gtcaca_tree_selected_node(app.tree) : NULL;
+}
+
+/* Put `expr` in the filter box. If `apply`, run it too; otherwise just prepare
+   it there for the user to edit (Wireshark's "Prepare as Filter"). */
+static void filter_set(const char *expr, int apply)
+{
+  if (app.fentry) gtcaca_entry_set_text(app.fentry, expr);
+  if (apply) apply_filter(expr);
+  else       app.focus = FOCUS_FILTER;
+}
+
+/* op: 0 = replace, 1 = "not", 2 = "and", 3 = "or" — mirroring Wireshark's
+   Apply as Filter submenu. */
+static void field_as_filter(int op, int apply)
+{
+  cfield_t *f = selected_field();
+  char one[320], expr[700];
+
+  if (!f || cfield_filter_expr(f, one, sizeof one) != 0) {
+    gtcaca_dialog_message("Apply as Filter",
+      "Select a field in the packet detail tree first.\n\n"
+      "Structural rows (a protocol header) have no value to filter on — pick one\n"
+      "of the fields underneath it.");
+    return;
+  }
+  switch (op) {
+  case 1: snprintf(expr, sizeof expr, "!(%s)", one); break;
+  case 2:
+    if (app.filter_text[0]) snprintf(expr, sizeof expr, "(%s) && (%s)", app.filter_text, one);
+    else                    snprintf(expr, sizeof expr, "%s", one);
+    break;
+  case 3:
+    if (app.filter_text[0]) snprintf(expr, sizeof expr, "(%s) || (%s)", app.filter_text, one);
+    else                    snprintf(expr, sizeof expr, "%s", one);
+    break;
+  default: snprintf(expr, sizeof expr, "%s", one); break;
+  }
+  filter_set(expr, apply);
+}
+
+static void act_apply_filter_sel(void *u)  { (void)u; field_as_filter(0, 1); }
+static void act_apply_filter_not(void *u)  { (void)u; field_as_filter(1, 1); }
+static void act_apply_filter_and(void *u)  { (void)u; field_as_filter(2, 1); }
+static void act_apply_filter_or(void *u)   { (void)u; field_as_filter(3, 1); }
+static void act_prepare_filter(void *u)    { (void)u; field_as_filter(0, 0); }
+
+/* Filter down to the conversation the selected packet belongs to: both
+   addresses and, when there's a transport, both ports. */
+static void act_conv_filter(void *u)
+{
+  long row = app.table ? gtcaca_table_selected_row(app.table) : -1;
+  long pidx = view_pkt_index(row);
+  cfield_t *root, *src, *dst;
+  carcal_l4_t l4;
+  char expr[512];
+  (void)u;
+
+  if (pidx < 0) return;
+  root = dissect_packet(&app.cap.pkts[pidx]);
+  if (!root) return;
+  src = cfield_find(root, "ip.src");
+  dst = cfield_find(root, "ip.dst");
+  if (!src || !dst || !src->str[0] || !dst->str[0]) {
+    cfield_free(root);
+    gtcaca_dialog_message("Conversation Filter", "This packet has no IP conversation.");
+    return;
+  }
+  if (carcal_locate_l4(&app.cap.pkts[pidx], &l4) && (l4.proto == 6 || l4.proto == 17)) {
+    const char *t = (l4.proto == 6) ? "tcp" : "udp";
+    snprintf(expr, sizeof expr,
+             "ip.addr == %s && ip.addr == %s && %s.port == %u && %s.port == %u",
+             src->str, dst->str, t, l4.sport, t, l4.dport);
+  } else {
+    snprintf(expr, sizeof expr, "ip.addr == %s && ip.addr == %s", src->str, dst->str);
+  }
+  cfield_free(root);
+  filter_set(expr, 1);
+}
+
+static void act_apply_column(void *u)
+{
+  cfield_t *f = selected_field();
+  (void)u;
+  if (!f || !f->abbrev[0]) {
+    gtcaca_dialog_message("Apply as Column",
+      "Select a field in the packet detail tree first.");
+    return;
+  }
+  if (columns_add(f->abbrev) != 0) {
+    gtcaca_dialog_message("Apply as Column",
+      app.ncols >= MAX_COLUMNS ? "Too many columns." : "That column is already shown.");
+    return;
+  }
+}
+
+static void act_reset_columns(void *u)
+{
+  (void)u;
+  columns_remove_custom();
+}
+
+/* ── Go to packet, mark ──────────────────────────────────────────────────── */
+static void act_goto_packet(void *u)
+{
+  char buf[32];
+  long n, row;
+  (void)u;
+  if (app.cap.count == 0) return;
+  if (!prompt_line("Go to packet number:", buf, sizeof buf)) return;
+  n = strtol(buf, NULL, 10);
+  if (n < 1 || n > app.cap.count) {
+    gtcaca_dialog_message("Go to Packet", "No such packet number.");
+    return;
+  }
+  /* The packet may be filtered out of the current view — find its row, and say
+     so plainly rather than silently jumping somewhere else. */
+  for (row = 0; row < app.nview; row++)
+    if (view_pkt_index(row) == n - 1) {
+      gtcaca_table_set_current(app.table, row, 0);
+      detail_rebuild(row);
+      return;
+    }
+  gtcaca_dialog_message("Go to Packet",
+    "That packet exists but is hidden by the current display filter.");
+}
+
+static void act_mark_packet(void *u)
+{
+  long row = app.table ? gtcaca_table_selected_row(app.table) : -1;
+  long pidx = view_pkt_index(row);
+  (void)u;
+  if (pidx < 0 || !app.marked || pidx >= app.marked_cap) return;
+  app.marked[pidx] = !app.marked[pidx];
+  app.nmarked += app.marked[pidx] ? 1 : -1;
+  if (app.nmarked < 0) app.nmarked = 0;
+}
+
+static void act_unmark_all(void *u)
+{
+  (void)u;
+  if (app.marked && app.marked_cap > 0) memset(app.marked, 0, (size_t)app.marked_cap);
+  app.nmarked = 0;
+}
+
+/* ── View: time format + coloring ────────────────────────────────────────── */
+static void act_time_format(void *u)
+{
+  (void)u;
+  app.timefmt = (app.timefmt + 1) % TF_COUNT;   /* cycle; the menu label shows it */
+  update_view_labels();
+}
+
+static void act_toggle_colorize(void *u)
+{
+  (void)u;
+  colorrules_set_enabled(!colorrules_enabled());
+  update_view_labels();
+}
+
+/* Show the rules actually in force, in the order they are consulted — including
+   the ones the .posa decoders contributed, so it's obvious where a color came
+   from. */
+static void act_coloring_rules(void *u)
+{
+  char buf[4096];
+  int i, n = colorrules_count();
+  size_t len = 0;
+  (void)u;
+
+  len += (size_t)snprintf(buf + len, sizeof buf - len,
+    "Coloring rules, first match wins (%d):\n\n", n);
+  for (i = 0; i < n && len < sizeof buf - 120; i++) {
+    char expr[192];
+    uint8_t fg, bg;
+    int en;
+    if (colorrules_get(i, expr, sizeof expr, &fg, &bg, &en) != 0) continue;
+    len += (size_t)snprintf(buf + len, sizeof buf - len, "%2d. %-34s %s on %s%s\n",
+                            i + 1, expr, colorrules_color_name(fg),
+                            colorrules_color_name(bg), en ? "" : "   (bad filter)");
+  }
+  snprintf(buf + len, sizeof buf - len,
+    "\nRules come from, in order:\n"
+    "  1. %s/colorfilters\n"
+    "  2. `color <filter> => <fg> <bg>` lines in the loaded .posa decoders\n"
+    "  3. carcal's built-in defaults\n", protos_dir());
+  gtcaca_dialog_message("Coloring Rules", buf);
+}
+
 static void build_menu(void)
 {
   int e;
@@ -2607,10 +3052,20 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Find Packet\xe2\x80\xa6", "^F", act_find,      NULL);
   gtcaca_menu_add_item(app.menu, e, "Find Next",            "n",   act_find_next, NULL);
   gtcaca_menu_add_item(app.menu, e, "Find Previous",        "N",   act_find_prev, NULL);
+  gtcaca_menu_add_separator(app.menu, e);
+  gtcaca_menu_add_item(app.menu, e, "Go to Packet\xe2\x80\xa6", "^G", act_goto_packet, NULL);
+  gtcaca_menu_add_separator(app.menu, e);
+  gtcaca_menu_add_item(app.menu, e, "Mark/Unmark Packet",   "m",   act_mark_packet, NULL);
+  gtcaca_menu_add_item(app.menu, e, "Unmark All",           "",    act_unmark_all,  NULL);
 
   g_view_entry  = gtcaca_menu_add_entry(app.menu, "View");
   g_item_details = gtcaca_menu_add_item(app.menu, g_view_entry, "[x] Packet Details", "", act_toggle_details, NULL);
   g_item_bytes   = gtcaca_menu_add_item(app.menu, g_view_entry, "[x] Packet Bytes",   "", act_toggle_bytes,   NULL);
+  gtcaca_menu_add_separator(app.menu, g_view_entry);
+  g_item_timefmt = gtcaca_menu_add_item(app.menu, g_view_entry, "Time Display Format", "t", act_time_format, NULL);
+  gtcaca_menu_add_separator(app.menu, g_view_entry);
+  g_item_colorize = gtcaca_menu_add_item(app.menu, g_view_entry, "[x] Colorize Packet List", "", act_toggle_colorize, NULL);
+  gtcaca_menu_add_item(app.menu, g_view_entry, "Coloring Rules\xe2\x80\xa6", "", act_coloring_rules, NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Capture");
   gtcaca_menu_add_item(app.menu, e, "Start\xe2\x80\xa6",     "",    act_capture_start,   NULL);
@@ -2618,6 +3073,16 @@ static void build_menu(void)
   gtcaca_menu_add_item(app.menu, e, "Restart",              "",    act_capture_restart, NULL);
 
   e = gtcaca_menu_add_entry(app.menu, "Analyze");
+  gtcaca_menu_add_item(app.menu, e, "Apply as Filter",      "=",   act_apply_filter_sel, NULL);
+  gtcaca_menu_add_item(app.menu, e, "  \xe2\x80\xa6 not Selected",  "", act_apply_filter_not, NULL);
+  gtcaca_menu_add_item(app.menu, e, "  \xe2\x80\xa6 and Selected",  "", act_apply_filter_and, NULL);
+  gtcaca_menu_add_item(app.menu, e, "  \xe2\x80\xa6 or Selected",   "", act_apply_filter_or,  NULL);
+  gtcaca_menu_add_item(app.menu, e, "Prepare as Filter",    "",    act_prepare_filter,   NULL);
+  gtcaca_menu_add_item(app.menu, e, "Conversation Filter",  "c",   act_conv_filter,      NULL);
+  gtcaca_menu_add_separator(app.menu, e);
+  gtcaca_menu_add_item(app.menu, e, "Apply as Column",      "|",   act_apply_column,     NULL);
+  gtcaca_menu_add_item(app.menu, e, "Remove Custom Columns","",    act_reset_columns,    NULL);
+  gtcaca_menu_add_separator(app.menu, e);
   gtcaca_menu_add_item(app.menu, e, "Follow TCP Stream",    "",    act_follow_tcp, NULL);
   gtcaca_menu_add_item(app.menu, e, "Follow UDP Stream",    "",    act_follow_udp, NULL);
   gtcaca_menu_add_separator(app.menu, e);
@@ -2709,6 +3174,54 @@ static void dump_tree(cfield_t *n, int depth)
     printf("%*s%s\n", depth * 2, "", c->label[0] ? c->label : c->abbrev);
     dump_tree(c, depth + 1);
   }
+}
+
+/* carcal --colors [FILE]
+ *
+ * Print the coloring rules in the order they are consulted, and — with a FILE —
+ * which one paints each packet. Coloring is otherwise only observable by looking
+ * at a terminal, which makes a mis-declared `color` line in a .posa annoying to
+ * debug; this makes it inspectable and testable. */
+static int colors_mode(const char *path)
+{
+  capture_t cap;
+  char err[256] = "";
+  int i, n;
+  long p;
+
+  load_decoders();          /* also composes the coloring rules */
+  n = colorrules_count();
+
+  printf("# coloring rules, in the order they are consulted (first match wins)\n");
+  for (i = 0; i < n; i++) {
+    char e[192];
+    uint8_t fg, bg;
+    int en;
+    if (colorrules_get(i, e, sizeof e, &fg, &bg, &en) != 0) continue;
+    printf("%2d. %-34s %-12s on %-12s%s\n", i + 1, e,
+           colorrules_color_name(fg), colorrules_color_name(bg),
+           en ? "" : "   << filter does not compile");
+  }
+  if (!path) return 0;
+
+  if (capture_load(path, &cap, err, sizeof err) != 0) {
+    fprintf(stderr, "carcal: %s\n", err);
+    return 1;
+  }
+  printf("\n# %s — %ld packet(s)\n", path, cap.count);
+  for (p = 0; p < cap.count; p++) {
+    cfield_t *root = dissect_packet(&cap.pkts[p]);
+    uint8_t fg = 0, bg = 0;
+    int hit = root ? colorrules_match(root, &fg, &bg) : 0;
+    dissect_summarize(&cap.pkts[p]);
+    printf("%4ld  %-8s %-28.28s  %s\n", p + 1, cap.pkts[p].col_proto, cap.pkts[p].col_info,
+           hit ? "" : "(no rule — default colors)");
+    if (hit)
+      printf("      \\_ %s on %s\n", colorrules_color_name(fg), colorrules_color_name(bg));
+    if (root) cfield_free(root);
+  }
+  capture_free(&cap);
+  return 0;
 }
 
 static int dump_mode(const char *path, const char *expr)
@@ -2861,6 +3374,7 @@ static void usage(FILE *out)
 "  carcal [FILE]                       open a capture in the interactive UI\n"
 "  carcal -i INTERFACE                 start capturing live, right away\n"
 "  carcal --dump FILE [FILTER]         dissect to stdout and exit (no UI)\n"
+"  carcal --colors [FILE]              show the coloring rules, and what they paint\n"
 "  carcal -s SCRIPT.lua -r FILE [...]  run a Lua script over a capture\n"
 "  carcal --help                       this help\n"
 "\n"
@@ -2919,8 +3433,6 @@ int main(int argc, char **argv)
   gtcaca_application_widget_t *appw;
   gtcaca_window_widget_t *win;
   int W, H;
-  int int_w;
-  int widths[7];
   const char *capfile = NULL, *graph_entity = NULL;
   const char *iface = NULL, *cfilter = NULL;
   int ai;
@@ -2929,6 +3441,10 @@ int main(int argc, char **argv)
 
   /* Before anything touches the display, so --help works with no TTY / piped. */
   if (has_arg(argc, argv, "-h", "--help")) { usage(stdout); return 0; }
+
+  /* Show the coloring rules (and, with a file, what they paint). */
+  if (argc >= 2 && strcmp(argv[1], "--colors") == 0)
+    return colors_mode(argc > 2 ? argv[2] : NULL);
 
   /* Headless mode for scripting/testing: carcal --dump <file> [filter] */
   if (argc >= 2 && strcmp(argv[1], "--dump") == 0) {
@@ -2979,7 +3495,9 @@ int main(int argc, char **argv)
   appw = gtcaca_application_new("carcal");
   win  = gtcaca_window_new(GTCACA_WIDGET(appw), NULL, 0, 0, W, H);
 
+  columns_init();
   build_menu();
+  update_view_labels();
 
   gtcaca_label_new(GTCACA_WIDGET(win), "Filter:", 0, 1);
   if (W >= 60) {
@@ -3003,12 +3521,7 @@ int main(int argc, char **argv)
   gtcaca_table_set_model(app.table, &table_model);
   gtcaca_table_set_title(app.table, "Packets");
 
-  int_w = W - 2;
-  widths[0] = 7;  widths[1] = 12; widths[2] = 18; widths[3] = 18;
-  widths[4] = 9;  widths[5] = 7;
-  widths[6] = int_w - (widths[0]+widths[1]+widths[2]+widths[3]+widths[4]+widths[5]);
-  if (widths[6] < 6) widths[6] = 6;
-  gtcaca_table_set_column_widths(app.table, widths, 7);
+  columns_apply_widths();
 
   /* Lower area is split: detail tree on the left, hex byte pane on the right. */
   app.tree_w = W * 60 / 100;
@@ -3125,6 +3638,7 @@ int main(int argc, char **argv)
     if (key == CTRL('o'))    { act_open(NULL); redraw(); continue; }
     if (key == CTRL('s'))    { act_save(NULL); redraw(); continue; }
     if (key == CTRL('f'))    { act_find(NULL); redraw(); continue; }
+    if (key == CTRL('g'))    { act_goto_packet(NULL); redraw(); continue; }
     if (key == '\t') { focus_advance(+1); redraw(); continue; }
 
     if (app.focus == FOCUS_FILTER) {
@@ -3147,6 +3661,12 @@ int main(int argc, char **argv)
       find_jump(key == 'n' ? +1 : -1); redraw(); continue;
     }
     if (key == 'q' || key == 'Q') { if (confirm_quit()) break; redraw(); continue; }
+    /* Wireshark-style one-key actions on the packet/detail panes. */
+    if (key == 'm') { act_mark_packet(NULL);      redraw(); continue; }
+    if (key == 't') { act_time_format(NULL);      redraw(); continue; }
+    if (key == 'c') { act_conv_filter(NULL);      redraw(); continue; }
+    if (key == '=') { act_apply_filter_sel(NULL); redraw(); continue; }
+    if (key == '|') { act_apply_column(NULL);     redraw(); continue; }
 
     if      (app.focus == FOCUS_TABLE) gtcaca_table_key(app.table, key, NULL);
     else if (app.focus == FOCUS_HEX && app.hex) gtcaca_hexview_key(app.hex, key, NULL);

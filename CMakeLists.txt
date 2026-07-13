@@ -92,6 +92,7 @@ add_executable(carcal
   src/filter.c
   src/field.c
   src/rules.c
+  src/colorrules.c
   src/lua_run.c)
 
 target_include_directories(carcal PRIVATE

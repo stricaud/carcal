@@ -55,6 +55,12 @@ cmake .. -DGTCACA_ROOT=/path/to/gtcaca -DLIBPCAPNG_ROOT=/path/to/libpcapng
 | `F9` / `F10` | Open the menu bar (File / Analyze / Help) |
 | `/` | Jump to the display-filter box |
 | `Tab` | Cycle focus: filter → packet table → detail tree → bytes → **menu bar** |
+| `=` | **Apply as Filter** — filter on the field the detail tree is on |
+| `\|` | **Apply as Column** — add that field as a packet-list column |
+| `c` | **Conversation Filter** — filter to the selected packet's conversation |
+| `t` | Cycle the **time display format** (since first / time of day / epoch / delta) |
+| `m` | Mark / unmark the selected packet |
+| `^G` | Go to packet number |
 | `↑ ↓ PgUp PgDn Home End` | Navigate the focused pane |
 | `← → / Space / Enter` | Collapse/expand a detail-tree node |
 | `^F` | Find packet (text, or `hex:DE AD BE EF`) |
@@ -76,6 +82,29 @@ The lower area is split into the **detail tree** (left) and a Wireshark-style
   loads it).
 - **Statistics** — IO Graph (packets per interval; green = all, yellow = current
   filter match), drawn with gtcaca's line chart.
+
+### Coloring rules
+
+The packet list is colored by an ordered list of `<display filter> → fg/bg`
+rules — **first match wins**, as in Wireshark. Rules are consulted from three
+places, most specific first:
+
+1. `<protos dir>/colorfilters` — your own rules, so you can override anything:
+   ```
+   # <display filter>       <fg>    <bg>
+   tcp.flags.reset == 1     yellow  red
+   dns                      white   blue
+   ```
+2. **`color` lines declared inside the loaded `.posa` decoders** (see below) —
+   a protocol ships its own coloring next to its dissector.
+3. carcal's built-in defaults (resets, ICMP, ARP, DNS, HTTP, SYN, TCP, UDP).
+
+`carcal --colors [FILE]` prints the rules in the order they're consulted and, if
+given a capture, which rule paints each packet — coloring is otherwise only
+observable by staring at a terminal, which makes a mis-typed rule hard to debug.
+
+Toggle coloring with **View ▸ Colorize Packet List**; a marked packet (`m`)
+always overrides its rule color.
 
 ### Display filters
 
@@ -121,9 +150,23 @@ rule udp.port == 6666 => SensorBeacon
 SensorBeacon`. Matching packets are then dissected with that protocol, its fields
 appearing in the detail tree and usable in filters (`SensorBeacon.seq == 1`).
 
-Bindings are **entirely data-driven**: a `rule` line is applied by libpcapng while
-dissecting, so dropping a `.posa` into `protos/` is all it takes to teach carcal a
-new protocol — no C change and no rebuild. (There are deliberately no compiled-in
+A decoder can also declare **how its packets should be colored**, so it ships its
+own look alongside its dissector:
+
+```
+color rdp.type == 3 => yellow red      # negotiation failure stands out
+color rdp           => black lightcyan
+```
+
+These are consulted before carcal's generic `tcp`/`udp` rules, so a protocol's
+own color wins (first match wins). Colors: `black blue green cyan red magenta
+brown lightgray darkgray lightblue lightgreen lightcyan lightred lightmagenta
+yellow white default`.
+
+Bindings and colors are **entirely data-driven**: the `rule` and `color` lines are
+read from the `.posa` itself, so dropping a file into `protos/` is all it takes to
+teach carcal a new protocol — decoded, bound and colored, with no C change and no
+rebuild. (There are deliberately no compiled-in
 decoder rules; adding one that a `.posa` already declares would decode the packet
 twice and attach the subtree twice.) `rule` binds a port; **Decode As…** and
 `protos/decoders.rules` take any display-filter condition, for what a port can't

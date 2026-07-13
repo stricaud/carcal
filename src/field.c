@@ -142,3 +142,86 @@ int cfield_collect(cfield_t *root, const char *abbrev, cfield_t **out, int max)
   collect_rec(root, abbrev, out, max, &n);
   return n;
 }
+
+/* Render a field as a display-filter expression, e.g. "ip.src == 10.0.0.1".
+ *
+ * This is the primitive behind Apply as Filter, Prepare as Filter, Apply as
+ * Column and the coloring rules: everything that needs "the filter for the thing
+ * the cursor is on" goes through here. Returns 0 on success, -1 if the field
+ * cannot be expressed (a structural row with no abbrev, or an opaque value).
+ *
+ * The literal forms produced must round-trip through filter_compile(), so they
+ * mirror what filter.c's value parser accepts for each cval_type_t. */
+int cfield_filter_expr(const cfield_t *f, char *out, size_t n)
+{
+  if (!f || !out || n == 0) return -1;
+  out[0] = '\0';
+  if (!f->abbrev[0]) return -1;          /* structural node — not filterable */
+
+  switch (f->vtype) {
+  case CV_UINT:
+    snprintf(out, n, "%s == %llu", f->abbrev, (unsigned long long)f->u);
+    return 0;
+  case CV_IPV4:
+  case CV_STR:
+    if (!f->str[0]) return -1;
+    /* Strings are quoted; an embedded quote would break the expression, and we
+       have no escape syntax, so refuse rather than emit something unparseable. */
+    if (f->vtype == CV_STR) {
+      if (strchr(f->str, '"')) return -1;
+      snprintf(out, n, "%s == \"%s\"", f->abbrev, f->str);
+    } else {
+      snprintf(out, n, "%s == %s", f->abbrev, f->str);
+    }
+    return 0;
+  case CV_MAC:
+    if (f->blen < 6) return -1;
+    snprintf(out, n, "%s == %02x:%02x:%02x:%02x:%02x:%02x", f->abbrev,
+             f->bytes[0], f->bytes[1], f->bytes[2],
+             f->bytes[3], f->bytes[4], f->bytes[5]);
+    return 0;
+  case CV_IPV6:
+    /* filter.c compares IPv6 as text, and .str already holds the printable
+       form the dissector produced. */
+    if (!f->str[0]) return -1;
+    snprintf(out, n, "%s == %s", f->abbrev, f->str);
+    return 0;
+  case CV_BYTES:
+  case CV_NONE:
+  default:
+    /* No literal syntax for opaque bytes — offer the presence test instead,
+       which is what Wireshark falls back to as well. */
+    snprintf(out, n, "%s", f->abbrev);
+    return 0;
+  }
+}
+
+/* Find the first field with this abbrev anywhere in the tree (used by custom
+   columns: "show me http.host for every packet"). NULL if absent. */
+cfield_t *cfield_find(cfield_t *root, const char *abbrev)
+{
+  cfield_t *c, *hit;
+  if (!root || !abbrev || !*abbrev) return NULL;
+  if (root->abbrev[0] && !strcmp(root->abbrev, abbrev)) return root;
+  for (c = root->children; c; c = c->next)
+    if ((hit = cfield_find(c, abbrev)) != NULL) return hit;
+  return NULL;
+}
+
+/* Printable value of a field, for a packet-list column cell. */
+void cfield_value_str(const cfield_t *f, char *out, size_t n)
+{
+  if (!f || !out || n == 0) { if (out && n) out[0] = '\0'; return; }
+  switch (f->vtype) {
+  case CV_UINT: snprintf(out, n, "%llu", (unsigned long long)f->u); break;
+  case CV_STR:
+  case CV_IPV4:
+  case CV_IPV6: snprintf(out, n, "%s", f->str); break;
+  case CV_MAC:
+    snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x",
+             f->bytes[0], f->bytes[1], f->bytes[2],
+             f->bytes[3], f->bytes[4], f->bytes[5]);
+    break;
+  default: snprintf(out, n, "%s", f->label[0] ? f->label : ""); break;
+  }
+}

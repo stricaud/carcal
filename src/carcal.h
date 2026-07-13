@@ -66,6 +66,15 @@ cfield_t *cfield_child_at(cfield_t *parent, int index);
    caller); returns count, fills out[] up to max. */
 int       cfield_collect(cfield_t *root, const char *abbrev, cfield_t **out, int max);
 
+/* Render a field as a display-filter expression, e.g. "ip.src == 10.0.0.1".
+   The primitive behind Apply as Filter / Apply as Column / coloring rules.
+   Returns 0, or -1 if the field cannot be expressed (structural row). */
+int       cfield_filter_expr(const cfield_t *f, char *out, size_t n);
+/* First field with this abbrev anywhere in the tree, or NULL. */
+cfield_t *cfield_find(cfield_t *root, const char *abbrev);
+/* Printable value, for a packet-list column cell. */
+void      cfield_value_str(const cfield_t *f, char *out, size_t n);
+
 /* ── Captured packet ────────────────────────────────────────────────────── */
 typedef struct {
   uint8_t  *data;          /* captured bytes (owned)                          */
@@ -189,6 +198,31 @@ cfilter_t *filter_compile(const char *expr, char *errbuf, size_t errlen);
 /* Evaluate against a dissection tree (non-zero = packet passes). */
 int        filter_eval(const cfilter_t *f, cfield_t *root);
 void       filter_free(cfilter_t *f);
+
+/* ── colorrules.c — packet-list coloring rules ──────────────────────────── */
+/* An ordered list of "<display filter> => fg/bg". The first rule that matches a
+   packet paints its row; later rules are not consulted.
+ *
+ * Rules come from three layers, most specific first:
+ *   1. the user's <protos dir>/colorfilters file
+ *   2. `color <filter> => <fg> <bg>` lines declared inside the loaded .posa
+ *      decoders — a protocol ships its own coloring, no rebuild needed
+ *   3. compiled-in defaults
+ * colorrules_reload() composes all three; call it after the posa decoders load. */
+void colorrules_reload(const char *user_file);
+void colorrules_add_defaults(void);
+int  colorrules_add_from_posa(void);                  /* returns #imported     */
+int  colorrules_load_file(const char *path);          /* -1 if absent          */
+int  colorrules_save_file(const char *path);
+int  colorrules_add(const char *expr, uint8_t fg, uint8_t bg);
+void colorrules_clear(void);
+int  colorrules_count(void);
+int  colorrules_get(int i, char *expr, size_t elen, uint8_t *fg, uint8_t *bg, int *enabled);
+/* 1 + fg/bg if a rule matched, else 0. */
+int  colorrules_match(cfield_t *root, uint8_t *fg, uint8_t *bg);
+int  colorrules_enabled(void);                        /* View ▸ Colorize       */
+void colorrules_set_enabled(int on);
+const char *colorrules_color_name(uint8_t v);
 
 /* ── rules.c — decoder rules ────────────────────────────────────────────── */
 /* A rule maps a display-filter condition to a posa decoder: when the condition
