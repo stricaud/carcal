@@ -42,6 +42,7 @@ case "$(uname -s)" in
     ;;
   MINGW*|MSYS*|CYGWIN*)
     "$ROOT/packaging/bundle-windows.sh"      # self-contained zip
+    "$ROOT/packaging/windows-installer.sh"   # + NSIS installer (best effort)
     ;;
   *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac

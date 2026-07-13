@@ -40,7 +40,7 @@ jobs:
           # libcaca, luajit and oniguruma are all prebuilt for MinGW — the whole
           # reason the Windows port is cheap. ':p' prefixes for the msystem.
           pacboy: >-
-            toolchain:p cmake:p ninja:p
+            toolchain:p cmake:p ninja:p nsis:p
             libcaca:p luajit:p oniguruma:p
           install: zip
 
@@ -89,6 +89,11 @@ jobs:
       - name: Build & bundle (Windows)
         if: runner.os == 'Windows'
         working-directory: carcal
+        env:
+          # The checkout is shallow, so `git describe` finds no tag to name the
+          # installer with — hand it the tag we were built from (empty for a
+          # workflow_dispatch run, which then versions the installer 0.0.0).
+          CARCAL_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
         run: |
           export GTCACA_SRC="$(cd ../gtcaca && pwd)"
           export LIBPCAPNG_SRC="$(cd ../libpcapng && pwd)"
@@ -119,6 +124,7 @@ jobs:
             carcal/dist/*.pkg
             carcal/dist/*.AppImage
             carcal/dist/*.zip
+            carcal/dist/*setup.exe
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
@@ -129,3 +135,4 @@ jobs:
             carcal/dist/*.pkg
             carcal/dist/*.AppImage
             carcal/dist/*.zip
+            carcal/dist/*setup.exe

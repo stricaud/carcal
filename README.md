@@ -185,18 +185,42 @@ from a reassembled stream — the MQS use-case, on any capture file):
 carcal -s scripts/mysql-queries.lua -r dump.pcapng -f "tcp.port == 3306"
 ```
 
-## Packaging (Linux & macOS)
+## Download
+
+Prebuilt binaries for **Windows, macOS and Linux**:
+**[stricaud.github.io/carcal](https://stricaud.github.io/carcal/)** (or the
+[releases page](https://github.com/stricaud/carcal/releases)).
+
+On Windows, either run the `setup.exe` installer (Start Menu entry, optional
+`.pcap`/`.pcapng` association, uninstaller) or unzip the portable `.zip` anywhere
+and run `carcal.exe` — no admin rights needed; it finds its `protos\` and
+`grammars\` next to the executable. Note that **live capture is not available on
+Windows** (see [Live capture](#live-capture)); opening capture files is fully
+supported.
+
+## Packaging (Linux, macOS & Windows)
 
 `packaging/build.sh` builds carcal + the sibling libraries (gtcaca, libpcapng)
-in Release and produces a **self-contained** tarball under `dist/` — every
+in Release and produces a **self-contained** bundle under `dist/` — every
 non-system library (gtcaca, libpcapng, libcaca, luajit, oniguruma) is bundled
 and the binary's load paths are rewritten (`@executable_path/../lib` on macOS,
 `$ORIGIN/../lib` on Linux), so it runs with no Homebrew / `LD_LIBRARY_PATH`.
+On Windows the DLLs simply sit next to `carcal.exe`, which is where Windows
+looks first.
 
 ```sh
 # libraries checked out next to this repo (../gtcaca, ../libpcapng):
 packaging/build.sh
 # → dist/carcal-macos-arm64.tar.gz   (or carcal-linux-x86_64.tar.gz, …)
+# → dist/carcal-windows-x86_64.zip   (from an MSYS2 UCRT64 shell)
+```
+
+The Windows build uses **MSYS2 / MinGW-w64 (UCRT64)**, where libcaca, LuaJIT and
+oniguruma are all available prebuilt:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-{toolchain,cmake,ninja,libcaca,luajit,oniguruma,nsis} zip
+packaging/build.sh          # from the UCRT64 shell
 ```
 
 The tarball contains `carcal` (a launcher that points at its bundled
@@ -214,12 +238,25 @@ wherever it's unpacked.
   executable (built with `linuxdeploy`; an `AppRun` hook points carcal at its
   bundled data). Falls back to just the tarball if `linuxdeploy` can't be
   fetched.
+- **Windows** — `dist/carcal-<version>-<arch>-setup.exe`, an NSIS installer
+  ([packaging/carcal.nsi](packaging/carcal.nsi)) that installs the same tree the
+  zip contains, plus a Start Menu entry, an Add/Remove Programs entry and an
+  uninstaller. Associating `.pcap`/`.pcapng` with carcal is an **optional,
+  off-by-default** component, so it never silently steals the extensions from
+  Wireshark. Unsigned, so SmartScreen will warn on first run; sign separately for
+  wide distribution. Skipped with a warning if `makensis` isn't installed.
 
 CI ([.github/workflows/release.yml](.github/workflows/release.yml)) builds the
-same artifacts on a matrix (Linux x86_64, macOS arm64 + x86_64) and attaches
-them to a release when a `v*` tag is pushed. Cross-compiling is intentionally
-avoided — each platform builds natively (libcaca's terminal backends make
-cross-builds of the C dependencies more trouble than a CI matrix).
+same artifacts on a matrix (Linux x86_64, macOS arm64, Windows x86_64) and
+attaches them to a release when a `v*` tag is pushed. Cross-compiling is
+intentionally avoided — each platform builds natively (libcaca's terminal
+backends make cross-builds of the C dependencies more trouble than a CI matrix).
+The Windows job also smoke-tests the *packaged* exe with `--dump`, so a missing
+DLL or a broken data-dir lookup fails the build instead of shipping.
+
+The download page at [docs/index.html](docs/index.html) is served by GitHub Pages
+and reads the latest release from the GitHub API at load time, so pushing a tag
+is all it takes to update it.
 
 ## Live capture
 
@@ -233,10 +270,17 @@ Opening an interface needs privileges: **root**, or on Linux
 `sudo setcap cap_net_raw+eip $(readlink -f ./carcal)`. Listing interfaces does
 not. Captured frames are assumed Ethernet.
 
+**Not available on Windows.** libpcapng's capture backends are Linux
+(`PACKET_MMAP`) and BSD/macOS (`bpf`); there is no Npcap backend, so on Windows
+the capture API compiles to stubs, the interface list comes back empty and
+**Capture ▸ Start…** reports that live capture is unsupported. Capture with
+Wireshark/`dumpcap` and open the file in carcal instead.
+
 ## Scope / limitations
 
 - pcapng is read via libpcapng; classic `.pcap` via a small built-in reader;
-  live capture via libpcapng's capture API (Linux `PACKET_MMAP`, macOS `bpf`).
+  live capture via libpcapng's capture API (Linux `PACKET_MMAP`, macOS `bpf`;
+  unsupported on Windows).
 - Built-in dissectors: Ethernet/802.1Q, IPv4, IPv6 (base header), ARP, TCP,
   UDP, ICMP/ICMPv6, DNS. Everything else is reachable through `.posa`.
 - Filters use "any" matching semantics for multi-valued fields, like Wireshark.

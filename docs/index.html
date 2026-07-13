@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>carcal — download</title>
+<meta name="description" content="carcal — a terminal packet analyzer. A tiny Wireshark for the TUI. Download for Windows, macOS and Linux.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🐾</text></svg>">
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --line:#2b3240; --fg:#e6edf3; --dim:#8b98a5;
+    --accent:#7ee787; --accent-dim:#2ea043; --amber:#e3b341;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#ffffff; --panel:#f6f8fa; --line:#d0d7de; --fg:#1f2328; --dim:#59636e;
+      --accent:#1a7f37; --accent-dim:#1a7f37; --amber:#9a6700;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg); font-family:var(--mono);
+    line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:860px; margin:0 auto; padding:3rem 1.25rem 5rem; }
+  header { text-align:center; margin-bottom:2.5rem; }
+  h1 { font-size:2.6rem; margin:0 0 .4rem; letter-spacing:-.02em; }
+  h1 .paw { color:var(--accent); }
+  .tag { color:var(--dim); margin:0; font-size:1rem; }
+  .shot {
+    display:block; width:100%; height:auto; margin:2rem 0; border:1px solid var(--line);
+    border-radius:8px;
+  }
+
+  /* primary download */
+  .primary { text-align:center; margin:2.5rem 0 1rem; }
+  .btn {
+    display:inline-block; background:var(--accent-dim); color:#fff; text-decoration:none;
+    padding:.85rem 1.75rem; border-radius:8px; font-size:1.05rem; font-weight:600;
+    border:1px solid transparent; transition:filter .15s ease;
+  }
+  .btn:hover { filter:brightness(1.12); }
+  .btn[aria-disabled="true"] { background:var(--panel); color:var(--dim); border-color:var(--line); cursor:default; }
+  .sub { color:var(--dim); font-size:.85rem; margin-top:.6rem; }
+  .sub a { color:var(--dim); }
+
+  /* asset table */
+  h2 { font-size:1.05rem; margin:2.5rem 0 .75rem; font-weight:600; }
+  .assets { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--panel); }
+  .row {
+    display:flex; align-items:center; gap:1rem; padding:.8rem 1rem;
+    border-bottom:1px solid var(--line); font-size:.9rem;
+  }
+  .row:last-child { border-bottom:0; }
+  .row .os { flex:0 0 7.5rem; color:var(--dim); }
+  .row .name { flex:1 1 auto; word-break:break-all; }
+  .row .name a { color:var(--fg); text-decoration:none; border-bottom:1px solid var(--line); }
+  .row .name a:hover { color:var(--accent); border-color:var(--accent); }
+  .row .size { flex:0 0 5rem; text-align:right; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .empty { padding:1rem; color:var(--dim); font-size:.9rem; }
+
+  .note {
+    margin-top:2rem; padding:1rem 1.15rem; border-left:3px solid var(--amber);
+    background:var(--panel); border-radius:0 6px 6px 0; font-size:.88rem; color:var(--dim);
+  }
+  .note strong { color:var(--fg); font-weight:600; }
+  pre {
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:1rem; overflow-x:auto; font-size:.85rem; margin:.75rem 0 0;
+  }
+  footer { margin-top:3.5rem; text-align:center; color:var(--dim); font-size:.85rem; }
+  footer a { color:var(--dim); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1><span class="paw">🐾</span> carcal</h1>
+    <p class="tag">A terminal packet analyzer — a tiny Wireshark for the TUI.</p>
+  </header>
+
+  <img class="shot" src="carcalui.png" alt="carcal showing a packet table, protocol tree and hex pane in a terminal">
+
+  <div class="primary">
+    <a id="cta" class="btn" href="https://github.com/stricaud/carcal/releases/latest" aria-disabled="true">Loading releases…</a>
+    <div class="sub" id="cta-sub">Fetching the latest release from GitHub…</div>
+  </div>
+
+  <h2>All downloads</h2>
+  <div class="assets" id="assets">
+    <div class="empty">Loading…</div>
+  </div>
+
+  <div class="note" id="win-note">
+    <strong>On Windows:</strong> the <code>setup.exe</code> installer adds a Start Menu entry and can
+    associate <code>.pcap</code> / <code>.pcapng</code> files (optional — it won't take them from Wireshark
+    unless you ask). Prefer no install? The <code>.zip</code> is fully portable: unzip anywhere and run
+    <code>carcal.exe</code>, keeping the DLLs and the <code>protos\</code> / <code>grammars\</code> folders
+    beside it. Reading capture files is fully supported; <strong>live capture is not available on
+    Windows</strong> — capture with Wireshark or <code>dumpcap</code> and open the file here.
+    Windows Terminal is recommended.
+  </div>
+
+  <h2>Build from source</h2>
+  <pre>git clone https://github.com/stricaud/carcal
+cd carcal &amp;&amp; mkdir build &amp;&amp; cd build
+cmake .. &amp;&amp; make
+./carcal /path/to/capture.pcapng</pre>
+
+  <footer>
+    <a href="https://github.com/stricaud/carcal">GitHub</a> ·
+    <a href="https://github.com/stricaud/carcal/releases">All releases</a> ·
+    MIT licensed
+  </footer>
+</div>
+
+<script>
+(function () {
+  var REPO = 'stricaud/carcal';
+
+  // Classify a release asset by filename. The release workflow emits:
+  //   carcal-windows-x86_64.zip | carcal-<ver>-x86_64-setup.exe
+  //   carcal-macos-arm64.tar.gz | carcal-macos-arm64.pkg
+  //   carcal-linux-x86_64.tar.gz | carcal-x86_64.AppImage
+  function classify(name) {
+    var n = name.toLowerCase();
+    if (n.indexOf('windows') !== -1 || /\.(zip|exe)$/.test(n))  return 'windows';
+    if (n.indexOf('macos') !== -1 || /\.pkg$/.test(n))          return 'macos';
+    if (n.indexOf('linux') !== -1 || /\.appimage$/.test(n))     return 'linux';
+    return 'other';
+  }
+
+  function isInstaller(name) { return /\.(exe|pkg|msi)$/i.test(name); }
+
+  // Which asset the big button points at. Windows users expect a Setup.exe, so
+  // lead with it there. On macOS the .pkg is unsigned (Gatekeeper makes it a
+  // worse first experience than the tarball), so lead with the archive.
+  function preferred(os, assets) {
+    var installers = assets.filter(function (a) { return isInstaller(a.name); });
+    var archives   = assets.filter(function (a) { return !isInstaller(a.name); });
+    var order = os === 'windows' ? installers.concat(archives)
+                                 : archives.concat(installers);
+    return order[0];
+  }
+
+  var LABEL = { windows: 'Windows', macos: 'macOS', linux: 'Linux', other: 'Source' };
+
+  function detectOS() {
+    var p = ((navigator.userAgentData && navigator.userAgentData.platform) ||
+             navigator.platform || navigator.userAgent || '').toLowerCase();
+    if (p.indexOf('win') !== -1) return 'windows';
+    if (p.indexOf('mac') !== -1) return 'macos';
+    if (p.indexOf('linux') !== -1 || p.indexOf('x11') !== -1) return 'linux';
+    return null;
+  }
+
+  function fmtSize(b) {
+    if (!b && b !== 0) return '';
+    var mb = b / 1048576;
+    return mb >= 1 ? mb.toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+  }
+
+  var cta     = document.getElementById('cta');
+  var ctaSub  = document.getElementById('cta-sub');
+  var assetsEl= document.getElementById('assets');
+
+  function fallback(msg) {
+    cta.textContent = 'View releases on GitHub';
+    cta.removeAttribute('aria-disabled');
+    cta.href = 'https://github.com/' + REPO + '/releases/latest';
+    ctaSub.textContent = msg;
+    assetsEl.innerHTML = '<div class="empty">Could not load the asset list. ' +
+      '<a href="https://github.com/' + REPO + '/releases">Browse releases on GitHub</a>.</div>';
+  }
+
+  fetch('https://api.github.com/repos/' + REPO + '/releases/latest', {
+    headers: { 'Accept': 'application/vnd.github+json' }
+  })
+  .then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(function (rel) {
+    var assets = (rel.assets || []).filter(function (a) { return classify(a.name) !== 'other'; });
+    if (!assets.length) { fallback('No downloadable assets in ' + (rel.tag_name || 'the latest release') + ' yet.'); return; }
+
+    // Primary button: this visitor's OS, if we ship for it.
+    var os = detectOS();
+    var mine = assets.filter(function (a) { return classify(a.name) === os; });
+    if (mine.length) {
+      var pick = preferred(os, mine);
+      cta.textContent = 'Download carcal for ' + LABEL[os];
+      cta.href = pick.browser_download_url;
+      cta.removeAttribute('aria-disabled');
+      ctaSub.innerHTML = (rel.tag_name || '') + ' · ' + pick.name + ' · ' + fmtSize(pick.size) +
+        (isInstaller(pick.name) ? ' · installer' : ' · portable');
+    } else {
+      cta.textContent = 'View all downloads';
+      cta.href = '#assets';
+      cta.removeAttribute('aria-disabled');
+      ctaSub.textContent = (rel.tag_name || 'Latest release') + ' — pick a build below.';
+    }
+
+    // Full asset list, grouped OS-first so Windows/macOS/Linux read in order.
+    var order = { windows: 0, macos: 1, linux: 2 };
+    assets.sort(function (a, b) {
+      var d = order[classify(a.name)] - order[classify(b.name)];
+      return d !== 0 ? d : a.name.localeCompare(b.name);
+    });
+
+    assetsEl.innerHTML = assets.map(function (a) {
+      var os = classify(a.name);
+      return '<div class="row">' +
+        '<div class="os">' + LABEL[os] + '</div>' +
+        '<div class="name"><a href="' + a.browser_download_url + '">' + a.name + '</a></div>' +
+        '<div class="size">' + fmtSize(a.size) + '</div>' +
+      '</div>';
+    }).join('');
+  })
+  .catch(function (e) {
+    // Unreleased repo, or the API's unauthenticated rate limit — degrade to a link.
+    fallback('Could not reach the GitHub API (' + e.message + ').');
+  });
+})();
+</script>
+</body>
+</html>
