@@ -40,6 +40,9 @@ case "$(uname -s)" in
     "$ROOT/packaging/bundle-linux.sh"        # self-contained tarball
     "$ROOT/packaging/appimage.sh"            # + single-file AppImage (best effort)
     ;;
+  MINGW*|MSYS*|CYGWIN*)
+    "$ROOT/packaging/bundle-windows.sh"      # self-contained zip
+    ;;
   *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 echo "==> artifacts in $ROOT/dist/"

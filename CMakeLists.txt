@@ -79,8 +79,11 @@ if(APPLE)
 endif()
 get_filename_component(_gtcaca_libdir "${GTCACA_LIBRARY}" DIRECTORY)
 get_filename_component(_pcapng_libdir "${PCAPNG_LIBRARY}" DIRECTORY)
-list(APPEND CMAKE_BUILD_RPATH   "${_gtcaca_libdir}" "${_pcapng_libdir}" /usr/local/lib)
-list(APPEND CMAKE_INSTALL_RPATH "${_gtcaca_libdir}" "${_pcapng_libdir}" /usr/local/lib)
+if(NOT WIN32)
+  # Windows has no rpath: the packaged DLLs sit next to carcal.exe instead.
+  list(APPEND CMAKE_BUILD_RPATH   "${_gtcaca_libdir}" "${_pcapng_libdir}" /usr/local/lib)
+  list(APPEND CMAKE_INSTALL_RPATH "${_gtcaca_libdir}" "${_pcapng_libdir}" /usr/local/lib)
+endif()
 
 add_executable(carcal
   src/main.c
@@ -110,6 +113,13 @@ target_link_libraries(carcal PRIVATE
   ${CACA_LIBRARIES}
   ${LUAJIT_LIBRARIES}
   m)
+
+if(WIN32)
+  # libpcapng's byte-order/inet_ntop helpers come from ws2_32; needed explicitly
+  # when it is linked statically. Live capture is unsupported on Windows (the
+  # library compiles its stub backend) — carcal is file-analysis only there.
+  target_link_libraries(carcal PRIVATE ws2_32)
+endif()
 
 # Older LuaJIT-on-macOS guidance asks for -pagezero_size/-image_base, but those
 # are x86_64-only and ignored under arm64 PIE, so we omit them.

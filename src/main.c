@@ -15,7 +15,11 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <gtcaca/win_compat.h>   /* usleep, isatty, ... (also pulls windows.h) */
+#else
+#  include <unistd.h>
+#endif
 
 #include <caca.h>
 
@@ -61,12 +65,47 @@
 
 #define CTRL(c) ((c) & 0x1f)
 
+#ifdef _WIN32
+/* On Windows the compile-time defaults are build-machine paths (meaningless on
+   the user's PC) and the portable zip has no launcher script to export the env
+   vars, so fall back to <dir containing carcal.exe>\<leaf>. Returns 0 on
+   failure, leaving the caller with the compile-time default. */
+static int exe_relative_dir(char *out, size_t outsz, const char *leaf)
+{
+  char exe[MAX_PATH];
+  char *slash;
+  DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
+  if (n == 0 || n >= sizeof exe) return 0;
+  slash = strrchr(exe, '\\');
+  if (!slash) return 0;
+  *slash = '\0';
+  snprintf(out, outsz, "%s\\%s", exe, leaf);
+  return 1;
+}
+#endif
+
 /* Data directories: env override (set by a relocatable bundle's launcher) wins
    over the compile-time default. */
 static const char *protos_dir(void)
-{ const char *e = getenv("CARCAL_PROTOS_DIR"); return (e && *e) ? e : CARCAL_PROTOS_DIR; }
+{
+  const char *e = getenv("CARCAL_PROTOS_DIR");
+  if (e && *e) return e;
+#ifdef _WIN32
+  { static char buf[MAX_PATH];
+    if (exe_relative_dir(buf, sizeof buf, "protos")) return buf; }
+#endif
+  return CARCAL_PROTOS_DIR;
+}
 static const char *grammars_dir(void)
-{ const char *e = getenv("CARCAL_GRAMMARS_DIR"); return (e && *e) ? e : CARCAL_GRAMMARS_DIR; }
+{
+  const char *e = getenv("CARCAL_GRAMMARS_DIR");
+  if (e && *e) return e;
+#ifdef _WIN32
+  { static char buf[MAX_PATH];
+    if (exe_relative_dir(buf, sizeof buf, "grammars")) return buf; }
+#endif
+  return CARCAL_GRAMMARS_DIR;
+}
 
 /* Load bundled posa decoders + the default/embedded decoder rules + an optional
    user rules file (protos/decoders.rules). Called once per run. */
