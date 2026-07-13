@@ -5,10 +5,18 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Sibling library repos (adjust if they live elsewhere).
+# Sibling library repos, pinned so a carcal tag always rebuilds identically.
+# Without a ref these track the default branch, and re-running an old tag would
+# silently pull whatever landed on it since.
+#
+# These are commit SHAs rather than tags because the Windows port is not in any
+# gtcaca/libpcapng release yet (gtcaca v0.0.5 predates it). Once both cut a tag
+# containing it, replace the SHAs with the tag names — `ref:` takes either.
 env:
   GTCACA_REPO: stricaud/gtcaca
+  GTCACA_REF: 285ec1bb8e030c13ee8915dec4bd4025e969508f      # "Add windows target"
   LIBPCAPNG_REPO: stricaud/libpcapng
+  LIBPCAPNG_REF: 2161d70b79603d3f634900f9fee658bc5306c560   # Windows compat + win_compat.h
 
 jobs:
   package:
@@ -50,11 +58,17 @@ jobs:
 
       - name: Checkout gtcaca
         uses: actions/checkout@v4
-        with: { repository: "${{ env.GTCACA_REPO }}", path: gtcaca }
+        with:
+          repository: "${{ env.GTCACA_REPO }}"
+          ref: "${{ env.GTCACA_REF }}"
+          path: gtcaca
 
       - name: Checkout libpcapng
         uses: actions/checkout@v4
-        with: { repository: "${{ env.LIBPCAPNG_REPO }}", path: libpcapng }
+        with:
+          repository: "${{ env.LIBPCAPNG_REPO }}"
+          ref: "${{ env.LIBPCAPNG_REF }}"
+          path: libpcapng
 
       - name: Install deps (Linux)
         if: runner.os == 'Linux'

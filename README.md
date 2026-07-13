@@ -248,7 +248,11 @@ wherever it's unpacked.
 
 CI ([.github/workflows/release.yml](.github/workflows/release.yml)) builds the
 same artifacts on a matrix (Linux x86_64, macOS arm64, Windows x86_64) and
-attaches them to a release when a `v*` tag is pushed. Cross-compiling is
+attaches them to a release when a `v*` tag is pushed. gtcaca and libpcapng are
+pinned by commit (`GTCACA_REF` / `LIBPCAPNG_REF` at the top of the workflow), so
+re-running an old tag rebuilds it identically instead of picking up whatever has
+since landed on their default branches — bump those two refs to take new library
+versions. Cross-compiling is
 intentionally avoided — each platform builds natively (libcaca's terminal
 backends make cross-builds of the C dependencies more trouble than a CI matrix).
 The Windows job also smoke-tests the *packaged* exe with `--dump`, so a missing
