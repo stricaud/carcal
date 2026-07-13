@@ -1,5 +1,5 @@
 /* field.c — cfield tree construction and traversal helpers. */
-#include "caracal.h"
+#include "carcal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

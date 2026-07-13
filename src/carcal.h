@@ -1,5 +1,5 @@
 /*
- * caracal.h — shared types for caracal, a TUI packet analyzer.
+ * carcal.h — shared types for carcal, a TUI packet analyzer.
  *
  * Data model, in Wireshark terms:
  *   - A capture is a list of cpkt_t (raw bytes + metadata + cached column text).
@@ -10,8 +10,8 @@
  *   - The display filter (filter.c) parses a tshark/Wireshark-compatible
  *     expression and evaluates it against a packet's dissection tree.
  */
-#ifndef CARACAL_H
-#define CARACAL_H
+#ifndef CARCAL_H
+#define CARCAL_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -129,8 +129,8 @@ typedef struct {
   uint32_t seq;              /* TCP only */
   uint8_t  flags;            /* TCP only */
   int      payoff, paylen;
-} caracal_l4_t;
-int       caracal_locate_l4(const cpkt_t *pkt, caracal_l4_t *out);
+} carcal_l4_t;
+int       carcal_locate_l4(const cpkt_t *pkt, carcal_l4_t *out);
 
 /* Common LINKTYPE values we understand. */
 #define LINKTYPE_NULL      0
@@ -143,7 +143,7 @@ int       caracal_locate_l4(const cpkt_t *pkt, caracal_l4_t *out);
 /* ── posa — user-defined protocols (engine lives in libpcapng core) ──────── */
 #include <libpcapng/posa.h>
 
-/* Compatibility aliases: caracal's older posa_* names map onto the libpcapng
+/* Compatibility aliases: carcal's older posa_* names map onto the libpcapng
    engine, so existing call sites (dissect.c, lua_run.c, the decoders UI) keep
    working while there is a single engine. */
 typedef pcapng_posa_ftype_t posa_ftype_t;
@@ -177,8 +177,8 @@ typedef pcapng_posa_proto_t  posa_proto_t;
 #define posa_to_text    pcapng_posa_to_text
 #define posa_resolve    pcapng_posa_resolve
 
-/* caracal-side wrapper: dissect with the libpcapng posa engine and convert the
-   resulting pcapng_field_t subtree into caracal's cfield tree (dissect.c). */
+/* carcal-side wrapper: dissect with the libpcapng posa engine and convert the
+   resulting pcapng_field_t subtree into carcal's cfield tree (dissect.c). */
 int  posa_dissect(const char *proto_name, const uint8_t *data, int len, cfield_t *parent, int abs_off);
 
 /* ── filter.c — display filter ──────────────────────────────────────────── */
@@ -206,13 +206,13 @@ int  rules_save_file(const char *path);   /* persist rules; returns 0 on success
 void rules_clear(void);
 
 /* TCP stream reassembly now lives in libpcapng (pcapng_tcp_reasm_*,
-   <libpcapng/reassembly_tcp.h>) — it is a library feature, not caracal's. */
+   <libpcapng/reassembly_tcp.h>) — it is a library feature, not carcal's. */
 
 /* ── lua_run.c — scriptable processing (generalized MQS) ────────────────── */
 /* Run `script_path` against the capture. For each packet (IP-defragmented via
    libpcapng) the Lua `packet(pkt)` is called (when present and `flt` passes);
    reassembled TCP stream bytes drive `stream(s)`. Returns 0 on success. */
-int caracal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
+int carcal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
                     char *errbuf, size_t errlen);
 
-#endif /* CARACAL_H */
+#endif /* CARCAL_H */

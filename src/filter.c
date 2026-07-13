@@ -11,7 +11,7 @@
  *   - field aliases:        ip.addr→{ip.src,ip.dst}  tcp.port→{srcport,dstport}
  *                           udp.port, eth.addr, ipv6.addr  (Wireshark "any" match)
  */
-#include "caracal.h"
+#include "carcal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

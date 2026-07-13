@@ -4,11 +4,11 @@
 -- packets (3-byte little-endian length, 1-byte sequence, then payload whose
 -- first byte is the command; 0x03 = COM_QUERY) out of the reassembled buffer.
 --
---   caracal -s scripts/mysql-queries.lua -r capture.pcapng -f "tcp.port == 3306"
+--   carcal -s scripts/mysql-queries.lua -r capture.pcapng -f "tcp.port == 3306"
 --
 -- Unlike MQS this works on any capture file, reassembles segments split across
 -- packets, and you could just as well bind a .posa protocol with -X and use
--- caracal.decode_as(s.data, "...") for a binary application protocol.
+-- carcal.decode_as(s.data, "...") for a binary application protocol.
 
 local COM_QUERY = 0x03
 

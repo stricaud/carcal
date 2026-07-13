@@ -1,12 +1,12 @@
-/* dissect.c — caracal's thin adapter over libpcapng's generic dissector.
+/* dissect.c — carcal's thin adapter over libpcapng's generic dissector.
  *
- * The protocol decoding now lives in libpcapng (pcapng_dissect); caracal simply
+ * The protocol decoding now lives in libpcapng (pcapng_dissect); carcal simply
  * converts that field tree into its own cfield tree, handles pcapng Custom
  * Blocks, and layers user-defined posa protocols on top for bound transport
  * ports. This keeps a single dissection engine (shared with the capture filter)
- * while preserving caracal's posa extension and UI model.
+ * while preserving carcal's posa extension and UI model.
  */
-#include "caracal.h"
+#include "carcal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -20,7 +20,7 @@ static uint32_t be32(const uint8_t *p)
 static uint32_t fold16(const uint8_t *p)
 { return be32(p) ^ be32(p + 4) ^ be32(p + 8) ^ be32(p + 12); }
 
-/* ── libpcapng field tree → caracal cfield tree ─────────────────────────── */
+/* ── libpcapng field tree → carcal cfield tree ─────────────────────────── */
 static cval_type_t map_ft(pcapng_ftype_t t)
 {
   switch (t) {
@@ -51,8 +51,8 @@ static void copy_children(cfield_t *dst, const pcapng_field_t *src)
   }
 }
 
-/* caracal-side posa: run the libpcapng posa engine into a temporary
-   pcapng_field_t subtree, then convert it into caracal's cfield tree. */
+/* carcal-side posa: run the libpcapng posa engine into a temporary
+   pcapng_field_t subtree, then convert it into carcal's cfield tree. */
 int posa_dissect(const char *proto, const uint8_t *data, int len, cfield_t *parent, int abs_off)
 {
   pcapng_field_t tmp, *c, *n;
@@ -84,16 +84,16 @@ static void remove_data_layers(cfield_t *root)
    the decoder name applied, or NULL. */
 static const char *apply_rules(const cpkt_t *pkt, cfield_t *root)
 {
-  caracal_l4_t l4;
+  carcal_l4_t l4;
   const char *proto = rules_match(root);   /* evaluate rules on the dissection */
   if (!proto) return NULL;
-  if (!caracal_locate_l4(pkt, &l4) || l4.paylen <= 0) return NULL;
+  if (!carcal_locate_l4(pkt, &l4) || l4.paylen <= 0) return NULL;
   remove_data_layers(root);
   posa_dissect(proto, pkt->data + l4.payoff, l4.paylen, root, l4.payoff);
   return proto;
 }
 
-/* ── custom block (caracal-specific; not a captured frame) ──────────────── */
+/* ── custom block (carcal-specific; not a captured frame) ──────────────── */
 static cfield_t *dissect_custom_block(const cpkt_t *pkt)
 {
   cfield_t *root = cfield_new("", CV_NONE), *fr, *cb, *f, *dn;
@@ -167,7 +167,7 @@ void dissect_summarize(cpkt_t *pkt)
 }
 
 /* ── transport locator (for hex/search/follow-stream) ───────────────────── */
-int caracal_locate_l4(const cpkt_t *pkt, caracal_l4_t *r)
+int carcal_locate_l4(const cpkt_t *pkt, carcal_l4_t *r)
 {
   const uint8_t *d = pkt->data;
   int len = (int)pkt->caplen, off = 0;

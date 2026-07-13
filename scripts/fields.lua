@@ -1,6 +1,6 @@
 -- fields.lua — show the "various ways" a field/protocol can be read, and use
 -- the display-filter engine from Lua.
---   caracal -s scripts/fields.lua -r capture.pcapng -f "dns || tcp"
+--   carcal -s scripts/fields.lua -r capture.pcapng -f "dns || tcp"
 
 function packet(pkt)
   -- direct field map (natural Lua values)

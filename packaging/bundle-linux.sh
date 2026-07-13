@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bundle-linux.sh — produce a self-contained Linux tarball: the caracal binary
+# bundle-linux.sh — produce a self-contained Linux tarball: the carcal binary
 # plus every non-system shared library it needs (from ldd), with an rpath of
 # $ORIGIN/../lib (via patchelf when available, else a launcher sets
 # LD_LIBRARY_PATH). glibc core libs are intentionally not bundled.
@@ -8,13 +8,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="$(uname -m)"
-NAME="caracal-linux-$ARCH"
+NAME="carcal-linux-$ARCH"
 OUT="$ROOT/dist/$NAME"
-BIN="$ROOT/build/caracal"
+BIN="$ROOT/build/carcal"
 
 [ -x "$BIN" ] || { echo "build first: $BIN missing" >&2; exit 1; }
-rm -rf "$OUT"; mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/share/caracal"
-cp "$BIN" "$OUT/bin/caracal"; chmod u+w "$OUT/bin/caracal"
+rm -rf "$OUT"; mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/share/carcal"
+cp "$BIN" "$OUT/bin/carcal"; chmod u+w "$OUT/bin/carcal"
 
 # core libraries that belong to the host, not the package
 is_core() {
@@ -34,13 +34,13 @@ ldd "$BIN" | awk '/=>/ {print $3} !/=>/ {print $1}' | while read -r so; do
 done
 
 if command -v patchelf >/dev/null 2>&1; then
-  patchelf --set-rpath '$ORIGIN/../lib' "$OUT/bin/caracal"
+  patchelf --set-rpath '$ORIGIN/../lib' "$OUT/bin/carcal"
 fi
 
-cp -R "$ROOT/protos" "$ROOT/grammars" "$ROOT/scripts" "$OUT/share/caracal/" 2>/dev/null || true
-cat > "$OUT/caracal" <<'SH'
+cp -R "$ROOT/protos" "$ROOT/grammars" "$ROOT/scripts" "$OUT/share/carcal/" 2>/dev/null || true
+cat > "$OUT/carcal" <<'SH'
 #!/usr/bin/env bash
-# resolve symlinks (e.g. a /usr/local/bin/caracal -> the bundle) to find our dir
+# resolve symlinks (e.g. a /usr/local/bin/carcal -> the bundle) to find our dir
 src="$0"
 while [ -h "$src" ]; do
   d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
@@ -48,11 +48,11 @@ while [ -h "$src" ]; do
 done
 here="$(cd "$(dirname "$src")" && pwd)"
 export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export CARACAL_PROTOS_DIR="$here/share/caracal/protos"
-export CARACAL_GRAMMARS_DIR="$here/share/caracal/grammars"
-exec "$here/bin/caracal" "$@"
+export CARCAL_PROTOS_DIR="$here/share/carcal/protos"
+export CARCAL_GRAMMARS_DIR="$here/share/carcal/grammars"
+exec "$here/bin/carcal" "$@"
 SH
-chmod +x "$OUT/caracal"
+chmod +x "$OUT/carcal"
 
 tar -C "$ROOT/dist" -czf "$ROOT/dist/$NAME.tar.gz" "$NAME"
 echo "==> $ROOT/dist/$NAME.tar.gz"

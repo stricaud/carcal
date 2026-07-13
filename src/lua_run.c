@@ -1,7 +1,7 @@
 /* lua_run.c — scriptable packet/stream processing with LuaJIT.
  *
  * A generalization of MQS: instead of decoding only MySQL and handing a query
- * string to Lua, caracal dissects every packet (built-in protocols + loaded
+ * string to Lua, carcal dissects every packet (built-in protocols + loaded
  * .posa definitions), reassembles IP fragments (libpcapng) and TCP streams, and
  * hands the fully decoded fields — in their various representations — to Lua.
  *
@@ -11,14 +11,14 @@
  *     function stream(s)         -- per reassembled in-order TCP chunk
  *     function finish(stats)     -- once, after processing
  *
- * Globals (the `caracal` table):
- *     caracal.decode_as(bytes, proto)   -> {field=value,…}  (posa, full bytes)
- *     caracal.decode_all(bytes, group)  -> { {proto=,fields=}, … }
- *     caracal.dissect(bytes [,linktype])-> pkt-like table
- *     caracal.protocols()               -> { name, … }
- *     caracal.hex(bytes)                -> "aabbcc…"
+ * Globals (the `carcal` table):
+ *     carcal.decode_as(bytes, proto)   -> {field=value,…}  (posa, full bytes)
+ *     carcal.decode_all(bytes, group)  -> { {proto=,fields=}, … }
+ *     carcal.dissect(bytes [,linktype])-> pkt-like table
+ *     carcal.protocols()               -> { name, … }
+ *     carcal.hex(bytes)                -> "aabbcc…"
  */
-#include "caracal.h"
+#include "carcal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -194,13 +194,13 @@ static void fill_layers(lua_State *L, int tab, cfield_t *f, int *idx)
 
 static void set_metatable(lua_State *L, int objabs, const char *mtfield)
 {
-  lua_getglobal(L, "caracal");
+  lua_getglobal(L, "carcal");
   lua_getfield(L, -1, mtfield);
   lua_setmetatable(L, objabs);
-  lua_pop(L, 1);  /* caracal */
+  lua_pop(L, 1);  /* carcal */
 }
 
-/* Build a pkt table on top of the stack. p may be NULL (caracal.dissect). */
+/* Build a pkt table on top of the stack. p may be NULL (carcal.dissect). */
 static void push_pkt(lua_State *L, const cpkt_t *p, cfield_t *root,
                      long number, int with_time, const capture_t *cap)
 {
@@ -352,7 +352,7 @@ static void push_posa_map(lua_State *L, const posa_proto_t *p, const uint8_t *d,
   }
 }
 
-/* ── caracal.* globals ──────────────────────────────────────────────────── */
+/* ── carcal.* globals ──────────────────────────────────────────────────── */
 static int l_decode_as(lua_State *L)
 {
   size_t len; const char *d = luaL_checklstring(L, 1, &len);
@@ -436,7 +436,7 @@ static int l_matches(lua_State *L)
 
 /* Lua-side metatables / convenience methods. */
 static const char PRELUDE[] =
-  "local C = caracal\n"
+  "local C = carcal\n"
   "C._pktmt = { __index = {\n"
   "  has = function(self,name)\n"
   "    if self.fields[name] ~= nil then return true end\n"
@@ -460,7 +460,7 @@ static const char PRELUDE[] =
   "  decode_as = function(self,proto) return C.decode_as(self.data, proto) end,\n"
   "} }\n";
 
-static int register_caracal(lua_State *L, char *err, size_t errlen)
+static int register_carcal(lua_State *L, char *err, size_t errlen)
 {
   lua_newtable(L);
   lua_pushcfunction(L, l_decode_as);  lua_setfield(L, -2, "decode_as");
@@ -469,7 +469,7 @@ static int register_caracal(lua_State *L, char *err, size_t errlen)
   lua_pushcfunction(L, l_protocols);  lua_setfield(L, -2, "protocols");
   lua_pushcfunction(L, l_hex);        lua_setfield(L, -2, "hex");
   lua_pushcfunction(L, l_matches);    lua_setfield(L, -2, "_matches");
-  lua_setglobal(L, "caracal");
+  lua_setglobal(L, "carcal");
   if (luaL_dostring(L, PRELUDE) != 0) {
     snprintf(err, errlen, "prelude: %s", lua_tostring(L, -1));
     return -1;
@@ -508,7 +508,7 @@ static void stream_cb(void *ud, uint32_t sip, uint16_t sport, uint32_t dip,
   set_metatable(L, tab, "_streammt");
   c->nstreams++;
   if (lua_pcall(L, 1, 0, 0) != 0) {
-    fprintf(stderr, "caracal: stream() error: %s\n", lua_tostring(L, -1));
+    fprintf(stderr, "carcal: stream() error: %s\n", lua_tostring(L, -1));
     lua_pop(L, 1);
   }
 }
@@ -523,7 +523,7 @@ static int has_global_fn(lua_State *L, const char *name)
   return r;
 }
 
-int caracal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
+int carcal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
                     char *errbuf, size_t errlen)
 {
   lua_State *L;
@@ -536,7 +536,7 @@ int caracal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
   L = luaL_newstate();
   if (!L) { snprintf(errbuf, errlen, "cannot create Lua state"); return -1; }
   luaL_openlibs(L);
-  if (register_caracal(L, errbuf, errlen) != 0) { lua_close(L); return -1; }
+  if (register_carcal(L, errbuf, errlen) != 0) { lua_close(L); return -1; }
 
   if (luaL_dofile(L, script_path) != 0) {
     snprintf(errbuf, errlen, "%s", lua_tostring(L, -1));
@@ -586,7 +586,7 @@ int caracal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
       lua_getglobal(L, "packet");
       push_pkt(L, &eff, root, i + 1, 1, cap);
       if (lua_pcall(L, 1, 0, 0) != 0) {
-        fprintf(stderr, "caracal: packet() error: %s\n", lua_tostring(L, -1));
+        fprintf(stderr, "carcal: packet() error: %s\n", lua_tostring(L, -1));
         lua_pop(L, 1);
       }
       g_cur_root = NULL;
@@ -612,7 +612,7 @@ int caracal_lua_run(const char *script_path, capture_t *cap, cfilter_t *flt,
     lua_pushnumber(L, (double)matched);       lua_setfield(L, -2, "matched");
     lua_pushnumber(L, (double)lc.nstreams);   lua_setfield(L, -2, "streams");
     if (lua_pcall(L, 1, 0, 0) != 0) {
-      fprintf(stderr, "caracal: finish() error: %s\n", lua_tostring(L, -1));
+      fprintf(stderr, "carcal: finish() error: %s\n", lua_tostring(L, -1));
       lua_pop(L, 1);
     }
   }

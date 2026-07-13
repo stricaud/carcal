@@ -23,9 +23,9 @@ jobs:
           - { os: ubuntu-latest, label: linux-x86_64 }
           - { os: macos-14,      label: macos-arm64  }
     steps:
-      - name: Checkout caracal
+      - name: Checkout carcal
         uses: actions/checkout@v4
-        with: { path: caracal }
+        with: { path: carcal }
 
       - name: Checkout gtcaca
         uses: actions/checkout@v4
@@ -52,7 +52,7 @@ jobs:
           brew install cmake pkg-config libcaca luajit oniguruma pybind11
 
       - name: Build & bundle
-        working-directory: caracal
+        working-directory: carcal
         run: |
           export GTCACA_SRC="$GITHUB_WORKSPACE/gtcaca"
           export LIBPCAPNG_SRC="$GITHUB_WORKSPACE/libpcapng"
@@ -63,17 +63,17 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: caracal-${{ matrix.label }}
+          name: carcal-${{ matrix.label }}
           path: |
-            caracal/dist/*.tar.gz
-            caracal/dist/*.pkg
-            caracal/dist/*.AppImage
+            carcal/dist/*.tar.gz
+            carcal/dist/*.pkg
+            carcal/dist/*.AppImage
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            caracal/dist/*.tar.gz
-            caracal/dist/*.pkg
-            caracal/dist/*.AppImage
+            carcal/dist/*.tar.gz
+            carcal/dist/*.pkg
+            carcal/dist/*.AppImage

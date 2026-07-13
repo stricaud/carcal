@@ -1,5 +1,5 @@
 -- summary.lua — print a tshark-like one-line summary per packet.
---   caracal -s scripts/summary.lua -r capture.pcapng [-f "ip"]
+--   carcal -s scripts/summary.lua -r capture.pcapng [-f "ip"]
 
 function packet(pkt)
   print(string.format("%5d  %.6f  %-15s -> %-15s  %-8s  %s",

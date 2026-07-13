@@ -1,6 +1,6 @@
 # tftp.posa — TFTP (RFC 1350), dispatched by opcode.
 #
-# Load is automatic (caracal reads its protos/ dir at startup). Bind it to the
+# Load is automatic (carcal reads its protos/ dir at startup). Bind it to the
 # TFTP port with:  Analyze ▸ Decode As…  →  udp 69 TFTP
 
 Object<TFTP> TFTP_RRQ

@@ -4,7 +4,7 @@
  * read directly (a small, self-contained reader). The first 4 bytes select the
  * format. Live capture is intentionally out of scope for now.
  */
-#include "caracal.h"
+#include "carcal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

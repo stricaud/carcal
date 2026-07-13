@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build.sh — build caracal and its sibling libraries (gtcaca, libpcapng) in
+# build.sh — build carcal and its sibling libraries (gtcaca, libpcapng) in
 # Release, then produce a self-contained package for the host OS.
 #
 #   GTCACA_SRC=/path LIBPCAPNG_SRC=/path packaging/build.sh
@@ -25,10 +25,10 @@ echo "==> gtcaca ($GTCACA_SRC)"
 cmake -S "$GTCACA_SRC" -B "$GTCACA_SRC/build" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" >/dev/null
 cmake --build "$GTCACA_SRC/build" --target gtcaca -j"$JOBS"
 
-echo "==> caracal ($ROOT)"
+echo "==> carcal ($ROOT)"
 cmake -S "$ROOT" -B "$ROOT/build" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
       -DGTCACA_ROOT="$GTCACA_SRC" -DLIBPCAPNG_ROOT="$LIBPCAPNG_SRC" >/dev/null
-cmake --build "$ROOT/build" --target caracal -j"$JOBS"
+cmake --build "$ROOT/build" --target carcal -j"$JOBS"
 
 export GTCACA_SRC LIBPCAPNG_SRC
 case "$(uname -s)" in

@@ -13,7 +13,7 @@ if(APPLE)
   endif()
 endif()
 
-project(caracal C)
+project(carcal C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -38,12 +38,12 @@ pkg_check_modules(LUAJIT REQUIRED luajit)
 # ── libpcapng ───────────────────────────────────────────────────────────────
 pkg_check_modules(PCAPNG QUIET libpcapng)
 # Prefer the source include tree — the installed headers omit protocols/ and
-# reassembly.h, which caracal's reassembly + posa decoding need.
+# reassembly.h, which carcal's reassembly + posa decoding need.
 find_path(PCAPNG_INCLUDE_DIR
   NAMES libpcapng/reassembly.h libpcapng/libpcapng.h
   HINTS "${LIBPCAPNG_ROOT}/lib/include" ${PCAPNG_INCLUDEDIR} /usr/local/include)
 # Prefer the freshly built dylib — the installed one may predate exported
-# symbols (reassembly, flow-direction normalizer) that caracal needs.
+# symbols (reassembly, flow-direction normalizer) that carcal needs.
 find_library(PCAPNG_LIBRARY
   NAMES pcapng
   HINTS "${LIBPCAPNG_ROOT}/build/lib" ${PCAPNG_LIBDIR} /usr/local/lib)
@@ -82,7 +82,7 @@ get_filename_component(_pcapng_libdir "${PCAPNG_LIBRARY}" DIRECTORY)
 list(APPEND CMAKE_BUILD_RPATH   "${_gtcaca_libdir}" "${_pcapng_libdir}" /usr/local/lib)
 list(APPEND CMAKE_INSTALL_RPATH "${_gtcaca_libdir}" "${_pcapng_libdir}" /usr/local/lib)
 
-add_executable(caracal
+add_executable(carcal
   src/main.c
   src/source.c
   src/dissect.c
@@ -91,7 +91,7 @@ add_executable(caracal
   src/rules.c
   src/lua_run.c)
 
-target_include_directories(caracal PRIVATE
+target_include_directories(carcal PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CACA_INCLUDE_DIRS}
   ${LUAJIT_INCLUDE_DIRS}
@@ -99,12 +99,12 @@ target_include_directories(caracal PRIVATE
   ${GTCACA_INCLUDE_DIR})
 
 if(GTCACA_BUILD_INCLUDE_DIR)
-  target_include_directories(caracal PRIVATE ${GTCACA_BUILD_INCLUDE_DIR})
+  target_include_directories(carcal PRIVATE ${GTCACA_BUILD_INCLUDE_DIR})
 endif()
 
-target_link_directories(caracal PRIVATE ${CACA_LIBRARY_DIRS} ${LUAJIT_LIBRARY_DIRS})
+target_link_directories(carcal PRIVATE ${CACA_LIBRARY_DIRS} ${LUAJIT_LIBRARY_DIRS})
 
-target_link_libraries(caracal PRIVATE
+target_link_libraries(carcal PRIVATE
   ${GTCACA_LIBRARY}
   ${PCAPNG_LIBRARY}
   ${CACA_LIBRARIES}
@@ -114,17 +114,17 @@ target_link_libraries(caracal PRIVATE
 # Older LuaJIT-on-macOS guidance asks for -pagezero_size/-image_base, but those
 # are x86_64-only and ignored under arm64 PIE, so we omit them.
 
-# Compiled-in data directories. Default to the in-tree copies so caracal runs
+# Compiled-in data directories. Default to the in-tree copies so carcal runs
 # from the build tree without an install step; a package build (e.g. Homebrew)
 # overrides these to the install prefix, e.g.
-#   -DCARACAL_DATA_PROTOS=<prefix>/share/caracal/protos
-# (the CARACAL_PROTOS_DIR / CARACAL_GRAMMARS_DIR env vars still win at runtime).
-set(CARACAL_DATA_PROTOS   "${CMAKE_CURRENT_SOURCE_DIR}/protos"   CACHE PATH "compiled-in protos dir")
-set(CARACAL_DATA_GRAMMARS "${CMAKE_CURRENT_SOURCE_DIR}/grammars" CACHE PATH "compiled-in grammars dir")
-target_compile_definitions(caracal PRIVATE
-  CARACAL_PROTOS_DIR="${CARACAL_DATA_PROTOS}"
-  CARACAL_GRAMMARS_DIR="${CARACAL_DATA_GRAMMARS}")
+#   -DCARCAL_DATA_PROTOS=<prefix>/share/carcal/protos
+# (the CARCAL_PROTOS_DIR / CARCAL_GRAMMARS_DIR env vars still win at runtime).
+set(CARCAL_DATA_PROTOS   "${CMAKE_CURRENT_SOURCE_DIR}/protos"   CACHE PATH "compiled-in protos dir")
+set(CARCAL_DATA_GRAMMARS "${CMAKE_CURRENT_SOURCE_DIR}/grammars" CACHE PATH "compiled-in grammars dir")
+target_compile_definitions(carcal PRIVATE
+  CARCAL_PROTOS_DIR="${CARCAL_DATA_PROTOS}"
+  CARCAL_GRAMMARS_DIR="${CARCAL_DATA_GRAMMARS}")
 
-install(TARGETS caracal RUNTIME DESTINATION bin)
-install(DIRECTORY protos/ DESTINATION share/caracal/protos FILES_MATCHING PATTERN "*.posa")
-install(DIRECTORY grammars/ DESTINATION share/caracal/grammars FILES_MATCHING PATTERN "*.json")
+install(TARGETS carcal RUNTIME DESTINATION bin)
+install(DIRECTORY protos/ DESTINATION share/carcal/protos FILES_MATCHING PATTERN "*.posa")
+install(DIRECTORY grammars/ DESTINATION share/carcal/grammars FILES_MATCHING PATTERN "*.json")

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# appimage.sh — build a single-file caracal-*.AppImage (Linux). Assembles an
+# appimage.sh — build a single-file carcal-*.AppImage (Linux). Assembles an
 # AppDir, lets linuxdeploy bundle the shared-library dependencies, and points
-# caracal at its bundled protos/grammars via an AppRun hook. Best-effort: if
+# carcal at its bundled protos/grammars via an AppRun hook. Best-effort: if
 # linuxdeploy can't be obtained it just warns (the tarball from bundle-linux.sh
 # remains the fallback).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARCH="$(uname -m)"
-BIN="$ROOT/build/caracal"
+BIN="$ROOT/build/carcal"
 
 # CI runners (and many minimal hosts) lack FUSE; make AppImage tools self-extract
 # instead of mounting, so linuxdeploy and appimagetool run without FUSE.
@@ -30,24 +30,24 @@ if [ ! -x "$TOOL" ]; then
 fi
 
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/caracal" \
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/carcal" \
          "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
          "$APPDIR/apprun-hooks"
-cp "$BIN" "$APPDIR/usr/bin/caracal"
-cp -R "$ROOT/protos" "$ROOT/grammars" "$ROOT/scripts" "$APPDIR/usr/share/caracal/" 2>/dev/null || true
-cp "$ROOT/packaging/caracal.desktop" "$APPDIR/usr/share/applications/caracal.desktop"
-cp "$ROOT/packaging/caracal.png"     "$APPDIR/usr/share/icons/hicolor/256x256/apps/caracal.png"
+cp "$BIN" "$APPDIR/usr/bin/carcal"
+cp -R "$ROOT/protos" "$ROOT/grammars" "$ROOT/scripts" "$APPDIR/usr/share/carcal/" 2>/dev/null || true
+cp "$ROOT/packaging/carcal.desktop" "$APPDIR/usr/share/applications/carcal.desktop"
+cp "$ROOT/packaging/carcal.png"     "$APPDIR/usr/share/icons/hicolor/256x256/apps/carcal.png"
 
-# point caracal at the in-AppImage data when run
-cat > "$APPDIR/apprun-hooks/caracal-data.sh" <<'SH'
-export CARACAL_PROTOS_DIR="$APPDIR/usr/share/caracal/protos"
-export CARACAL_GRAMMARS_DIR="$APPDIR/usr/share/caracal/grammars"
+# point carcal at the in-AppImage data when run
+cat > "$APPDIR/apprun-hooks/carcal-data.sh" <<'SH'
+export CARCAL_PROTOS_DIR="$APPDIR/usr/share/carcal/protos"
+export CARCAL_GRAMMARS_DIR="$APPDIR/usr/share/carcal/grammars"
 SH
 
 cd "$ROOT/dist"
-OUTPUT="caracal-linux-$ARCH.AppImage" \
+OUTPUT="carcal-linux-$ARCH.AppImage" \
   "$TOOL" --appdir "$APPDIR" \
-          --desktop-file "$APPDIR/usr/share/applications/caracal.desktop" \
-          --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/caracal.png" \
+          --desktop-file "$APPDIR/usr/share/applications/carcal.desktop" \
+          --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/carcal.png" \
           --output appimage
-echo "==> $ROOT/dist/caracal-linux-$ARCH.AppImage"
+echo "==> $ROOT/dist/carcal-linux-$ARCH.AppImage"
