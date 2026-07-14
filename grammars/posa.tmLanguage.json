@@ -4,11 +4,12 @@
   "fileTypes": ["posa"],
   "patterns": [
     { "name": "comment.line.number-sign.posa", "match": "#.*$" },
+    { "name": "string.quoted.double.posa", "match": "\"[^\"]*\"" },
     { "name": "keyword.control.posa",
-      "match": "\\b(Object|protocol|end|required|optional)\\b" },
+      "match": "\\b(Object|protocol|end|required|optional|when|scope|repeat|until|as|label|bits|seek|layer|include|info|col|abbrev|rule|color|mask|hex)\\b" },
     { "name": "entity.name.type.parent.posa", "match": "<[A-Za-z0-9_]+>" },
     { "name": "storage.type.posa",
-      "match": "\\b(uint8|uint16|uint32|uint64|le_uint16|le_uint32|le_uint64|mac|ip4|cstring|payload|bytes)\\b" },
+      "match": "\\b(uint8|uint16|uint24|uint32|uint64|le_uint16|le_uint32|le_uint64|mac|ip4|ip6|cstring|string|payload|bytes|str|utf16|dnsname)\\b" },
     { "name": "constant.numeric.hex.posa", "match": "\\b0[xX][0-9a-fA-F]+\\b" },
     { "name": "constant.numeric.posa", "match": "\\b[0-9]+\\b" },
     { "name": "constant.other.enum.posa", "match": "\\b[A-Z][A-Z0-9_]{1,}\\b" }

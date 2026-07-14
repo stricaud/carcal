@@ -184,6 +184,7 @@ typedef pcapng_posa_proto_t  posa_proto_t;
 #define posa_at         pcapng_posa_at
 #define posa_find       pcapng_posa_find
 #define posa_to_text    pcapng_posa_to_text
+#define posa_source     pcapng_posa_source   /* the .posa text as written, if kept */
 #define posa_resolve    pcapng_posa_resolve
 
 /* carcal-side wrapper: dissect with the libpcapng posa engine and convert the

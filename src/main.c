@@ -2292,9 +2292,16 @@ static const char POSA_TEMPLATE[] =
 static const char *POSA_HELP[] = {
   "posa quick reference", "",
   "Object<parent> NAME", "   start a protocol", "",
-  "required <type> name = def", "    ENUM = value   (indented", "    lines add enum labels)", "",
-  "types:", "  uint8/16/32/64", "  le_uint16/32/64", "  mac, ip4, cstring",
-  "  payload  (rest)", "  bytes<N> (fixed)", "  bytes[lenfield]", "",
+  "required <type> name = def", "    [mask N] [hex] \"Label\"", "    ENUM = value   (indented",
+  "    lines add enum labels)", "",
+  "types:", "  uint8/16/24/32/64", "  le_uint16/32/64", "  mac, ip4, ip6, cstring",
+  "  payload  (rest)", "  bytes<N> (fixed)", "  bytes[lenfield]", "  str[len], utf16[len]",
+  "  dnsname (0xc0 ptrs)", "",
+  "structure:", "  when <cond>:", "  scope <lenfield>", "  repeat <count> as <item>",
+  "  repeat until end as <i>", "  label \"%s\" field", "  bits <src> <n> <sh> <w>",
+  "  seek <offsetfield>", "  layer <name> <Proto>", "  include <Object>", "",
+  "binding:", "  rule tcp.port == 445", "  rule udp.port == 53", "  rule ip.proto == 2",
+  "  rule eth.type == 0x88cc", "     ... => Proto", "",
   "Object<parent> groups sub-", "protocols dispatched on the", "first field's value.", "",
   "^S  save & load", "Esc close",
 };
@@ -2374,15 +2381,25 @@ static void act_posa_new(void *u)
   posa_editor_open("New .posa decoder", POSA_TEMPLATE, sp);
 }
 
-/* Open the editor on an existing decoder's regenerated source (persists on save). */
+/* Open the editor on an existing decoder (persists on save). Show the source the
+   decoder was actually parsed from when we still have it — posa_to_text() only
+   reconstructs a normalized subset, so a round-trip through it would drop the
+   comments, the rules, and every extended construct (repeat, bits, seek, …) that
+   protocols like DNS and SMB2 are built out of. */
 static void posa_edit_existing(const posa_proto_t *p)
 {
-  char *text = malloc(65536), sp[1100], title[80];
-  if (!text) return;
-  posa_to_text(p, text, 65536);
+  const char *src = posa_source(p->name);
+  char *text = NULL, sp[1100], title[80];
+
+  if (!src) {
+    text = malloc(65536);
+    if (!text) return;
+    posa_to_text(p, text, 65536);
+    src = text;
+  }
   snprintf(sp, sizeof sp, "%s/%s.posa", protos_dir(), p->name);
   snprintf(title, sizeof title, "Edit decoder: %s", p->name);
-  posa_editor_open(title, text, sp);
+  posa_editor_open(title, src, sp);
   free(text);
 }
 
