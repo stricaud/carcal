@@ -402,6 +402,23 @@ static void columns_remove_custom(void)
   columns_apply_widths();
 }
 
+/* Broken-down local time. localtime_r is POSIX and absent on Windows (MinGW/UCRT
+   offer localtime_s, whose arguments are the other way round), so go through the
+   plain localtime() and copy — carcal is single-threaded, which is the only
+   reason the _r variant would matter. */
+static void local_time(time_t secs, struct tm *out)
+{
+  struct tm *p;
+  memset(out, 0, sizeof *out);
+#ifdef _WIN32
+  p = localtime(&secs);
+  if (p) *out = *p;
+#else
+  p = localtime_r(&secs, out);
+  (void)p;
+#endif
+}
+
 /* Time column, per View ▸ Time Display Format. `row` is needed for the
    "since previous displayed" format, which depends on the filtered view. */
 static void format_time(const cpkt_t *p, long row, char *b, int l)
@@ -413,11 +430,11 @@ static void format_time(const cpkt_t *p, long row, char *b, int l)
 
   switch (app.timefmt) {
   case TF_TIME_OF_DAY:
-    localtime_r(&secs, &tmv);
+    local_time(secs, &tmv);
     snprintf(b, l, "%02d:%02d:%02d.%06u", tmv.tm_hour, tmv.tm_min, tmv.tm_sec, frac);
     break;
   case TF_DATE_TIME:
-    localtime_r(&secs, &tmv);
+    local_time(secs, &tmv);
     snprintf(b, l, "%04d-%02d-%02d %02d:%02d:%02d.%06u",
              tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
              tmv.tm_hour, tmv.tm_min, tmv.tm_sec, frac);

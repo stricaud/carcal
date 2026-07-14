@@ -5,18 +5,24 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Sibling library repos, pinned so a carcal tag always rebuilds identically.
-# Without a ref these track the default branch, and re-running an old tag would
-# silently pull whatever landed on it since.
+# Sibling library repos.
 #
-# These are commit SHAs rather than tags because the Windows port is not in any
-# gtcaca/libpcapng release yet (gtcaca v0.0.5 predates it). Once both cut a tag
-# containing it, replace the SHAs with the tag names — `ref:` takes either.
+# These track `main` while carcal, gtcaca and libpcapng are being developed
+# together. carcal regularly lands code that needs an API added to a library in
+# the same breath (the posa `color` grammar, the table row-color hook), and a
+# pinned SHA means CI keeps building the new carcal against the old library —
+# which fails with confusing "implicit declaration" / "excess elements in struct
+# initializer" errors that look like carcal bugs but are just a stale pin.
+#
+# The cost is that a tag is only reproducible as long as the libraries' `main`
+# doesn't move. That is the right trade *now*; before cutting a release, pin
+# these to the tags of the library releases it was built against — `ref:` takes a
+# tag, a branch or a SHA, so it is a one-line change at that point.
 env:
   GTCACA_REPO: stricaud/gtcaca
-  GTCACA_REF: 3ccc7b017cc4ed664cf82aa1306a12b20a58ba1c      # "Fix compile flags" — the gnu99/strdup segfault fix
+  GTCACA_REF: main
   LIBPCAPNG_REPO: stricaud/libpcapng
-  LIBPCAPNG_REF: 668bb8ac2e369e2342d3b2c2c71a49ae91f5a807   # "Build with msvc"
+  LIBPCAPNG_REF: main
 
 jobs:
   package:
