@@ -1,0 +1,14 @@
+{
+  "comments": { "lineComment": "#" },
+  "brackets": [["<", ">"], ["[", "]"]],
+  "autoClosingPairs": [
+    { "open": "\"", "close": "\"" },
+    { "open": "<", "close": ">" },
+    { "open": "[", "close": "]" }
+  ],
+  "surroundingPairs": [["\"", "\""], ["<", ">"], ["[", "]"]],
+  "indentationRules": {
+    "increaseIndentPattern": "^\\s*(Object|protocol|when|else|scope|repeat)\\b.*$",
+    "decreaseIndentPattern": "^\\s*(end)\\b.*$"
+  }
+}

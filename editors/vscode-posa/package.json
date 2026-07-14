@@ -1,0 +1,27 @@
+{
+  "name": "posa",
+  "displayName": "posa (carcal packet decoders)",
+  "description": "Syntax highlighting for .posa declarative packet decoders (carcal / libpcapng).",
+  "version": "1.0.0",
+  "publisher": "carcal",
+  "license": "MIT",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "posa",
+        "aliases": ["posa", "Posa"],
+        "extensions": [".posa"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "posa",
+        "scopeName": "source.posa",
+        "path": "./syntaxes/posa.tmLanguage.json"
+      }
+    ]
+  }
+}
