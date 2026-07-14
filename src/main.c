@@ -14,12 +14,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #  include <gtcaca/win_compat.h>   /* usleep, isatty, ... (also pulls windows.h) */
 #else
 #  include <unistd.h>
+#endif
+#if defined(__linux__)
+#  include <sys/socket.h>
+#  include <arpa/inet.h>           /* htons                                     */
+#  include <linux/if_packet.h>
+#  include <linux/if_ether.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+      defined(__NetBSD__)
+#  include <fcntl.h>
 #endif
 
 #include <caca.h>
@@ -65,6 +75,9 @@
 #endif
 
 #define CTRL(c) ((c) & 0x1f)
+
+static const char *g_prog = "carcal";   /* argv[0], for messages telling the
+                                           user how to re-run us              */
 
 #ifdef _WIN32
 /* On Windows the compile-time defaults are build-machine paths (meaningless on
@@ -2713,10 +2726,71 @@ static void stop_capture(void)
   app.capturing = 0;
 }
 
+/* Live capture needs raw-packet access, and libpcapng opens the capture socket
+   lazily on the first dispatch() — so a missing privilege surfaces as a plain
+   dispatch failure with no reason attached. Probe the raw device ourselves so
+   we can tell the user what to do instead of reporting "device error".
+   Returns 1 and fills `buf` when access is denied, 0 otherwise. */
+static int capture_permission_denied(char *buf, size_t n)
+{
+#if defined(__linux__)
+  const char *path;
+  int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+  if (fd >= 0) { close(fd); return 0; }
+  if (errno != EPERM && errno != EACCES) return 0;
+  /* setcap needs a real path; argv[0] has none when we came from $PATH. */
+  path = strchr(g_prog, '/') ? g_prog : "$(command -v carcal)";
+  snprintf(buf, n,
+    "Permission denied: live capture needs raw-socket access (CAP_NET_RAW).\n"
+    "\n"
+    "Either run carcal as root:\n"
+    "    sudo %s\n"
+    "\n"
+    "or grant the binary the capability once, and run it as yourself:\n"
+    "    sudo setcap cap_net_raw,cap_net_admin=eip %s",
+    g_prog, path);
+  return 1;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+      defined(__NetBSD__)
+  int i, denied = 0;
+  for (i = 0; i < 8; i++) {
+    char dev[32];
+    int fd;
+    snprintf(dev, sizeof dev, "/dev/bpf%d", i);
+    fd = open(dev, O_RDONLY);
+    if (fd >= 0) { close(fd); return 0; }       /* we can open a bpf device   */
+    if (errno == EBUSY) continue;               /* busy, but readable by us   */
+    if (errno == EACCES || errno == EPERM) { denied = 1; continue; }
+    break;                                      /* ENOENT: no more bpf nodes  */
+  }
+  if (!denied) return 0;
+  snprintf(buf, n,
+    "Permission denied: live capture needs access to /dev/bpf*.\n"
+    "\n"
+    "Either run carcal as root:\n"
+    "    sudo %s\n"
+    "\n"
+    "or give your user access to the bpf devices (on macOS, the ChmodBPF\n"
+    "helper shipped with Wireshark does this at boot).",
+    g_prog);
+  return 1;
+#else
+  (void)buf; (void)n;
+  return 0;
+#endif
+}
+
 static int start_capture(const char *iface, const char *cfilter)
 {
   char err[PCAPNG_CAPTURE_ERRBUF_SIZE] = "";
-  pcapng_capture_t *h = pcapng_capture_open(iface, err);
+  char hint[512];
+  pcapng_capture_t *h;
+
+  if (capture_permission_denied(hint, sizeof hint)) {
+    gtcaca_dialog_message("Capture \xe2\x80\x94 permission denied", hint);
+    return 0;
+  }
+  h = pcapng_capture_open(iface, err);
   if (!h) {
     gtcaca_dialog_message("Capture failed",
       err[0] ? err : "cannot open interface (need root / CAP_NET_RAW)");
@@ -3455,6 +3529,7 @@ int main(int argc, char **argv)
   int ai;
 
   app.detail_for = -1;
+  if (argv[0] && argv[0][0]) g_prog = argv[0];
 
   /* Before anything touches the display, so --help works with no TTY / piped. */
   if (has_arg(argc, argv, "-h", "--help")) { usage(stdout); return 0; }
@@ -3595,7 +3670,20 @@ int main(int argc, char **argv)
       /* Pump the capture ring without blocking the UI, then poll for input. */
       long before = app.cap.count;
       int nd = pcapng_capture_dispatch(app.cap_handle, 64, capture_cb, NULL);
-      if (nd < 0) { stop_capture(); gtcaca_dialog_message("Capture", "capture ended (device error)"); }
+      if (nd < 0) {
+        char hint[512];
+        char msg[256];
+        stop_capture();
+        if (capture_permission_denied(hint, sizeof hint)) {
+          gtcaca_dialog_message("Capture \xe2\x80\x94 permission denied", hint);
+        } else {
+          snprintf(msg, sizeof msg,
+                   "Capture on %s ended: the device stopped delivering packets\n"
+                   "(interface down, unplugged, or removed).",
+                   app.cap_iface[0] ? app.cap_iface : "the interface");
+          gtcaca_dialog_message("Capture", msg);
+        }
+      }
       if (app.cap.count != before) {
         if (app.cap_follow && app.table && app.nview > 0)
           gtcaca_table_set_current(app.table, app.nview - 1, 0);
