@@ -4,14 +4,17 @@
   "fileTypes": ["posa"],
   "patterns": [
     { "name": "comment.line.number-sign.posa", "match": "#.*$" },
-    { "name": "string.quoted.double.posa", "match": "\"[^\"]*\"" },
+    { "name": "keyword.other.binding.posa", "match": "^\\s*(rule|color)\\b" },
     { "name": "keyword.control.posa",
-      "match": "\\b(Object|protocol|end|required|optional|when|scope|repeat|until|as|label|bits|seek|layer|include|info|col|abbrev|rule|color|mask|hex)\\b" },
-    { "name": "entity.name.type.parent.posa", "match": "<[A-Za-z0-9_]+>" },
+      "match": "\\b(Object|protocol|end|default|required|optional|when|else|scope|repeat|until|as|label|bits|seek|layer|include|info|col|abbrev|mask|hex)\\b" },
     { "name": "storage.type.posa",
-      "match": "\\b(uint8|uint16|uint24|uint32|uint64|le_uint16|le_uint32|le_uint64|mac|ip4|ip6|cstring|string|payload|bytes|str|utf16|dnsname)\\b" },
+      "match": "\\b(uint8|uint16|uint24|uint32|uint64|le_uint16|le_uint32|le_uint64|mac|ip4|ip6|cstring|string|payload|dnsname)\\b" },
+    { "name": "storage.type.posa", "match": "\\b(bytes|str|utf16)(?=[<\\[])" },
+    { "name": "entity.name.type.parent.posa", "match": "<[A-Za-z0-9_]+>" },
+    { "name": "string.quoted.double.posa", "match": "\"(\\\\.|[^\"\\\\])*\"" },
+    { "name": "keyword.operator.posa", "match": "(==|!=|<=|>=|=>|<|>|=|&)" },
     { "name": "constant.numeric.hex.posa", "match": "\\b0[xX][0-9a-fA-F]+\\b" },
     { "name": "constant.numeric.posa", "match": "\\b[0-9]+\\b" },
-    { "name": "constant.other.enum.posa", "match": "\\b[A-Z][A-Z0-9_]{1,}\\b" }
+    { "name": "variable.other.field.posa", "match": "\\b[a-z_][a-z0-9_]*\\b" }
   ]
 }
