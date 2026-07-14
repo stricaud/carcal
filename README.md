@@ -273,7 +273,19 @@ carcal -s scripts/mysql-queries.lua -r dump.pcapng -f "tcp.port == 3306"
 
 ## Download
 
-Prebuilt binaries for **Windows, macOS and Linux**:
+The quickest way, on any of the three platforms:
+
+```sh
+pip install carcal
+carcal /path/to/capture.pcapng
+```
+
+There is no Python in carcal — the wheel is just the same self-contained bundle
+the releases ship, with a shim that puts `carcal` on your `PATH` (the way `ruff`
+and `cmake` are distributed on PyPI). `pipx install carcal` works too, and keeps
+it out of your site-packages.
+
+Otherwise, prebuilt binaries for **Windows, macOS and Linux**:
 **[stricaud.github.io/carcal](https://stricaud.github.io/carcal/)** (or the
 [releases page](https://github.com/stricaud/carcal/releases)).
 
@@ -338,9 +350,37 @@ wherever it's unpacked.
   Wireshark. Unsigned, so SmartScreen will warn on first run; sign separately for
   wide distribution. Skipped with a warning if `makensis` isn't installed.
 
+### Python wheels (`pip install carcal`)
+
+[packaging/wheel.py](packaging/wheel.py) repacks a `dist/` bundle as a
+platform-tagged wheel — the bundles are already relocatable, so this is a repack,
+not a second build. There is no Python in the project and no compilation here:
+the wheel is the bundle plus a `console_scripts` shim that sets
+`CARCAL_PROTOS_DIR` / `CARCAL_GRAMMARS_DIR` to the copies inside it and `exec`s
+the binary. It's the launcher script's job, done where Python already knows the
+install prefix (both env vars are `setdefault`, so pointing carcal at your own
+`.posa` decoders still wins).
+
+```sh
+packaging/build.sh                  # produces dist/carcal-<plat>/
+python3 packaging/wheel.py          # → dist/carcal-<ver>-py3-none-<tag>.whl
+```
+
+The platform tag is read off the binaries rather than hardcoded, so it can't
+promise more compatibility than the bundle has: the glibc it linked against on
+Linux (`manylinux_2_35_x86_64` from the pinned 22.04 runner) and the highest
+`LC_BUILD_VERSION` across the binary *and* every bundled dylib on macOS — that
+floor is set by the Homebrew bottles, not by carcal, so macOS wheels support the
+CI runner's OS and newer. A wheel tagged below its true floor installs fine and
+then dies at exec, which is exactly the bug this avoids.
+
 CI ([.github/workflows/release.yml](.github/workflows/release.yml)) builds the
 same artifacts on a matrix (Linux x86_64, macOS arm64, Windows x86_64) and
-attaches them to a release when a `v*` tag is pushed. gtcaca and libpcapng are
+attaches them to a release when a `v*` tag is pushed. It also installs each wheel
+into a fresh venv and dissects a packet through the console script, then
+publishes them to PyPI via Trusted Publishing (OIDC — no API token in secrets;
+the publisher is configured on PyPI for this repo + `release.yml` + the `pypi`
+environment). gtcaca and libpcapng are
 pinned by commit (`GTCACA_REF` / `LIBPCAPNG_REF` at the top of the workflow), so
 re-running an old tag rebuilds it identically instead of picking up whatever has
 since landed on their default branches — bump those two refs to take new library

@@ -34,7 +34,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  label: linux-x86_64   }
+          # Pinned to 22.04, not ubuntu-latest, to set the glibc floor: a binary
+          # linked against a newer glibc will not start on an older distro, and
+          # `latest` silently raises that floor every time GitHub rolls the
+          # image. 22.04's glibc 2.35 covers Debian 12 and the current LTSes.
+          # It is also what the manylinux tag on the wheel is derived from.
+          - { os: ubuntu-22.04,   label: linux-x86_64   }
           - { os: macos-14,       label: macos-arm64    }
           - { os: windows-latest, label: windows-x86_64 }
 
@@ -153,6 +158,53 @@ jobs:
           echo "$out" | grep -q "User Datagram Protocol" \
             || { echo "smoke test failed: UDP layer not dissected" >&2; exit 1; }
 
+      # Repack the bundle we just smoke-tested as a wheel, so `pip install carcal`
+      # ships the exact tree the tarball/dmg/zip ship. PyPI is a binary channel
+      # here — there is no Python in carcal — so the wheel is that bundle plus a
+      # console-script shim. The platform tag is derived from the binaries
+      # themselves (glibc / LC_BUILD_VERSION); see packaging/wheel.py.
+      # On Windows the wheel is built and tested with the runner's *native*
+      # CPython in git bash, not the MSYS2 python the rest of the job uses: an
+      # MSYS2 interpreter reports a mingw platform tag and so refuses to install
+      # a win_amd64 wheel — it would reject the very artifact we ship.
+      - name: Set up Python for the wheel (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build & smoke-test the wheel
+        working-directory: carcal
+        shell: bash
+        env:
+          CARCAL_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: |
+          # Pick an interpreter that actually runs: on Windows a bare `python3`
+          # can resolve to the Store app-execution stub, which is on PATH but
+          # is not an interpreter.
+          py=
+          for c in python3 python; do
+            if command -v "$c" >/dev/null 2>&1 && "$c" -c "import sys" >/dev/null 2>&1; then
+              py="$c"; break
+            fi
+          done
+          [ -n "$py" ] || { echo "no working python found" >&2; exit 1; }
+          "$py" packaging/wheel.py
+
+          # Install it the way a user would and dissect a packet through the
+          # console script: proves pip kept the exec bit on the binary and that
+          # the shim points carcal at the protos/ that shipped inside the wheel.
+          printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x04\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x2a\x00\x00\x00\x2a\x00\x00\x00\xaa\xbb\xcc\xdd\xee\xff\x11\x22\x33\x44\x55\x66\x08\x00\x45\x00\x00\x1c\x00\x01\x00\x00\x40\x11\x00\x00\x7f\x00\x00\x01\x7f\x00\x00\x01\x00\x35\x00\x35\x00\x08\x00\x00' > wheel-smoke.pcap
+          "$py" -m venv wheelenv
+          vbin=wheelenv/bin; [ -d "$vbin" ] || vbin=wheelenv/Scripts
+          "$vbin/pip" install --quiet dist/*.whl
+          out="$("$vbin/carcal" --dump wheel-smoke.pcap)"
+          echo "$out"
+          echo "$out" | grep -q "User Datagram Protocol" \
+            || { echo "wheel smoke test failed: UDP layer not dissected" >&2; exit 1; }
+          echo "$out" | grep -qE "[1-9][0-9]* custom protocol" \
+            || { echo "wheel smoke test failed: bundled protos/ not loaded" >&2; exit 1; }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -164,6 +216,7 @@ jobs:
             carcal/dist/*.AppImage
             carcal/dist/*.zip
             carcal/dist/*setup.exe
+            carcal/dist/*.whl
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
@@ -176,3 +229,40 @@ jobs:
             carcal/dist/*.AppImage
             carcal/dist/*.zip
             carcal/dist/*setup.exe
+            carcal/dist/*.whl
+
+  # Publish the per-platform wheels as `pip install carcal`.
+  #
+  # Uses PyPI Trusted Publishing (OIDC): the `id-token: write` permission plus a
+  # publisher configured on PyPI for this repo+workflow, so there is no API token
+  # in repo secrets. Set that up on PyPI once, before the first tag, under
+  # Manage project -> Publishing.
+  publish-pypi:
+    name: publish to PyPI
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Collect wheels from every platform
+        uses: actions/download-artifact@v4
+        with:
+          pattern: carcal-*
+          path: artifacts
+          merge-multiple: true
+
+      # gh-action-pypi-publish uploads everything in packages-dir, and the
+      # artifacts carry .dmg/.zip/.pkg too — so hand it a directory of wheels
+      # only, or the upload is rejected.
+      - name: Stage wheels
+        run: |
+          mkdir -p wheels
+          find artifacts -name '*.whl' -exec mv {} wheels/ \;
+          ls -l wheels
+          [ -n "$(ls -A wheels)" ] || { echo "no wheels to publish" >&2; exit 1; }
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheels
